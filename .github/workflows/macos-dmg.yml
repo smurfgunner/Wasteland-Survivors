@@ -7,7 +7,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+# Releases are serialized so two closely-spaced pushes cannot calculate the same next version.
+concurrency:
+  group: macos-release-main
+  cancel-in-progress: false
 
 jobs:
   build-macos-dmg:
@@ -54,6 +59,16 @@ jobs:
           fi
           echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
+      - name: Determine next release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST_VERSION=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v"; "")] | sort_by(split(".") | map(tonumber)) | last // "1.0.0"')
+          IFS='.' read -r MAJOR MINOR _ <<< "$LATEST_VERSION"
+          RELEASE_VERSION="${MAJOR}.$((MINOR + 1)).0"
+
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+
       - name: Archive macOS app
         run: |
           xcodebuild \
@@ -65,7 +80,9 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
             CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES
+            CODE_SIGNING_ALLOWED=YES \
+            MARKETING_VERSION="$RELEASE_VERSION" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
 
       - name: Create DMG
         run: |
@@ -96,9 +113,12 @@ jobs:
             --wait
           xcrun stapler staple "$DMG_PATH"
 
-      - name: Upload DMG
-        uses: actions/upload-artifact@v6
-        with:
-          name: Wasteland-Survivors-macOS-${{ github.sha }}
-          path: ${{ env.DMG_PATH }}
-          if-no-files-found: error
+      - name: Publish DMG to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$RELEASE_VERSION" \
+            "$DMG_PATH#Wasteland-Survivors-$RELEASE_VERSION.dmg" \
+            --target "$GITHUB_SHA" \
+            --title "Wasteland Survivors $RELEASE_VERSION" \
+            --generate-notes
