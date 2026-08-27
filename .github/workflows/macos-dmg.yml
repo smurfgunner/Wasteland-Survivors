@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-macos-dmg:
-    runs-on: macos-latest
+    runs-on: xcode-27
     env:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
