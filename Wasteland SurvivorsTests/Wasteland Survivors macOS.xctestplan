@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "ABEBD0DE-2E9A-4EA1-A0AC-5F63C8634CF7",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Wasteland Survivors.xcodeproj",
+      "identifier" : "45657BAF3040E89F0035E459",
+      "name" : "Wasteland Survivors macOS"
+    },
+    "testInteropMode" : "complete"
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Wasteland Survivors.xcodeproj",
+        "identifier" : "45D6F3773040E934007567F3",
+        "name" : "Wasteland SurvivorsTests"
+      }
+    }
+  ],
+  "version" : 1
+}
