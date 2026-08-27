@@ -10,6 +10,9 @@ final class PlayerNode: SKNode {
     private(set) var currentHealth: CGFloat = 100
     private(set) var currentWeapon: WeaponType = .pistol
     
+    let healthRegenerationDelay: TimeInterval = 4
+    let healthRegenerationRate: CGFloat = 10
+    private var regenerationCooldownRemaining: TimeInterval = 0
     private var lastFireTime: TimeInterval = 0
     private let moveSpeed: CGFloat = 180
     
@@ -81,7 +84,10 @@ final class PlayerNode: SKNode {
     }
     
     func takeDamage(amount: CGFloat) {
-        currentHealth -= amount
+        guard amount > 0 else { return }
+        
+        currentHealth = Swift.max(0, currentHealth - amount)
+        regenerationCooldownRemaining = healthRegenerationDelay
         
         bodySprite.fillColor = .systemRed
         bodySprite.run(.sequence([
@@ -92,8 +98,22 @@ final class PlayerNode: SKNode {
         ]))
     }
     
+    @discardableResult
+    func updateHealth(deltaTime: TimeInterval) -> Bool {
+        guard deltaTime > 0, currentHealth > 0, currentHealth < maxHealth else { return false }
+        
+        regenerationCooldownRemaining = Swift.max(0, regenerationCooldownRemaining - deltaTime)
+        guard regenerationCooldownRemaining <= 0.000_001 else { return false }
+        regenerationCooldownRemaining = 0
+        
+        let previousHealth = currentHealth
+        currentHealth = Swift.min(maxHealth, currentHealth + healthRegenerationRate * CGFloat(deltaTime))
+        return currentHealth != previousHealth
+    }
+    
     func reset() {
         currentHealth = maxHealth
+        regenerationCooldownRemaining = 0
         currentWeapon = .pistol
         equip(weapon: .pistol)
     }
