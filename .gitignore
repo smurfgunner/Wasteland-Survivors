@@ -63,3 +63,4 @@ fastlane/test_output
 docs/
 AGENTS.md
 CLAUDE.md
+.DS_Store
