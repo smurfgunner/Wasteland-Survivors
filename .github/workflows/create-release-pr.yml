@@ -1,0 +1,83 @@
+name: Create Release PR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: create-release-pr
+  cancel-in-progress: false
+
+jobs:
+  create-release-pr:
+    name: Create develop to main PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build changelog and create or update PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git fetch origin main develop --quiet
+
+          # Filter by reachability locally. A PR is already synced when its
+          # merge commit is an ancestor of main.
+          CHANGELOG=""
+          while IFS=$'\t' read -r number title commit; do
+            if ! git merge-base --is-ancestor "$commit" origin/main; then
+              CHANGELOG+="- #$number: $title"$'\n'
+            fi
+          done < <(gh pr list \
+            --repo "$GH_REPO" \
+            --base develop \
+            --state merged \
+            --limit 1000 \
+            --json number,title,mergeCommit,mergedAt \
+            --jq 'sort_by(.mergedAt) | .[] | select(.mergeCommit.oid != null) | [.number, .title, .mergeCommit.oid] | @tsv')
+
+          if [ -z "$CHANGELOG" ]; then
+            echo "No merged develop PRs are waiting to be synced into main."
+            exit 0
+          fi
+
+          BODY=$(mktemp)
+          {
+            echo "## Changelog"
+            echo
+            printf '%s' "$CHANGELOG"
+            echo
+            echo "This PR was created automatically from \`develop\` into \`main\`."
+          } > "$BODY"
+
+          EXISTING_PR=$(gh pr list \
+            --repo "$GH_REPO" \
+            --base main \
+            --head develop \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" \
+              --repo "$GH_REPO" \
+              --title "Sync develop into main" \
+              --body-file "$BODY"
+            echo "Updated PR #$EXISTING_PR."
+          else
+            gh pr create \
+              --repo "$GH_REPO" \
+              --base main \
+              --head develop \
+              --title "Sync develop into main" \
+              --body-file "$BODY"
+          fi
