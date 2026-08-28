@@ -102,12 +102,20 @@ final class PlayerNode: SKNode {
     func updateHealth(deltaTime: TimeInterval) -> Bool {
         guard deltaTime > 0, currentHealth > 0, currentHealth < maxHealth else { return false }
         
-        regenerationCooldownRemaining = Swift.max(0, regenerationCooldownRemaining - deltaTime)
-        guard regenerationCooldownRemaining <= 0.000_001 else { return false }
+        let regenerationTime: TimeInterval
+        if regenerationCooldownRemaining > deltaTime {
+            regenerationCooldownRemaining -= deltaTime
+            return false
+        }
+
+        regenerationTime = deltaTime - regenerationCooldownRemaining
         regenerationCooldownRemaining = 0
         
         let previousHealth = currentHealth
-        currentHealth = Swift.min(maxHealth, currentHealth + healthRegenerationRate * CGFloat(deltaTime))
+        currentHealth = Swift.min(
+            maxHealth,
+            currentHealth + healthRegenerationRate * CGFloat(regenerationTime)
+        )
         return currentHealth != previousHealth
     }
     
