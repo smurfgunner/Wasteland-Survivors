@@ -3,6 +3,7 @@
 //  example-game Shared
 //
 
+import Foundation
 import SpriteKit
 
 final class HUDManager {
@@ -39,6 +40,7 @@ final class HUDManager {
         let barWidth: CGFloat = 200
         let barHeight: CGFloat = 18
         let barBg = SKShapeNode(rectOf: CGSize(width: barWidth, height: barHeight), cornerRadius: 4)
+        barBg.name = "healthBar"
         barBg.fillColor = SKColor(white: 0.1, alpha: 0.8)
         barBg.strokeColor = .lightGray
         barBg.lineWidth = 1.5
@@ -46,6 +48,7 @@ final class HUDManager {
         containerNode.addChild(barBg)
         
         let fill = SKShapeNode(rectOf: CGSize(width: barWidth - 4, height: barHeight - 4), cornerRadius: 2)
+        fill.name = "healthBarFill"
         fill.fillColor = .systemGreen
         fill.strokeColor = .clear
         fill.position = barBg.position
@@ -63,7 +66,8 @@ final class HUDManager {
         self.healthLabel = hpText
         
         // 2. Weapon Indicator (Bottom Left)
-        let weaponBg = SKShapeNode(rectOf: CGSize(width: 220, height: 50), cornerRadius: 8)
+        let weaponBg = SKShapeNode(rectOf: CGSize(width: 220, height: 64), cornerRadius: 8)
+        weaponBg.name = "weaponPanel"
         weaponBg.fillColor = SKColor(white: 0.1, alpha: 0.8)
         weaponBg.strokeColor = .orange
         weaponBg.lineWidth = 1.5
@@ -75,16 +79,17 @@ final class HUDManager {
         wLabel.fontSize = 15
         wLabel.fontColor = .systemYellow
         wLabel.horizontalAlignmentMode = .left
-        wLabel.position = CGPoint(x: -halfW + 30, y: -halfH + 52)
+        wLabel.position = CGPoint(x: -halfW + 30, y: -halfH + 58)
         containerNode.addChild(wLabel)
         self.weaponLabel = wLabel
         
         let badge = SKLabelNode(fontNamed: "HelveticaNeue-Medium")
-        badge.text = "[RANGED] • Range: 280"
-        badge.fontSize = 11
+        badge.text = "[RANGED] • DMG: 30 • RNG: 280\nFIR: 0.35"
+        badge.fontSize = 10
         badge.fontColor = .lightGray
         badge.horizontalAlignmentMode = .left
-        badge.position = CGPoint(x: -halfW + 30, y: -halfH + 34)
+        badge.verticalAlignmentMode = .center
+        badge.position = CGPoint(x: -halfW + 30, y: -halfH + 35)
         containerNode.addChild(badge)
         self.weaponTypeBadge = badge
         
@@ -145,10 +150,19 @@ final class HUDManager {
         }
     }
     
-    func updateWeapon(weapon: WeaponType) {
+    func updateWeapon(
+        weapon: WeaponType,
+        damage: CGFloat? = nil,
+        range: CGFloat? = nil,
+        fireRate: TimeInterval? = nil
+    ) {
+        let displayedDamage = damage ?? weapon.damage
+        let displayedRange = range ?? weapon.range
+        let displayedFireRate = fireRate ?? weapon.fireRate
+
         weaponLabel?.text = weapon.rawValue
         weaponLabel?.fontColor = weapon.color
-        weaponTypeBadge?.text = "[\(weapon.category.rawValue)] • DMG: \(Int(weapon.damage)) • RNG: \(Int(weapon.range))"
+        weaponTypeBadge?.text = "[\(weapon.category.rawValue)] • DMG: \(Int(displayedDamage)) • RNG: \(Int(displayedRange))\nFIR: \(String(format: "%.2f", displayedFireRate))"
     }
     
     func updateKillCount(_ count: Int) {

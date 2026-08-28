@@ -1,12 +1,12 @@
 import SpriteKit
 
 final class MeleeSlashNode: SKNode {
-    init(weapon: WeaponType, angle: CGFloat) {
+    init(weapon: WeaponType, range: CGFloat? = nil, angle: CGFloat) {
         super.init()
         zRotation = angle
 
         let path = CGMutablePath()
-        let r = weapon.range
+        let r = range ?? weapon.range
         path.move(to: .zero)
         path.addArc(center: .zero, radius: r, startAngle: -0.6, endAngle: 0.6, clockwise: false)
         path.closeSubpath()

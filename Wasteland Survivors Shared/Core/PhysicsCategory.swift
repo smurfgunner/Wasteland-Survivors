@@ -7,4 +7,5 @@ enum PhysicsCategory {
     static let projectile: UInt32 = 1 << 2
     static let chest: UInt32 = 1 << 3
     static let meleeHitbox: UInt32 = 1 << 4
+    static let powerUp: UInt32 = 1 << 5
 }

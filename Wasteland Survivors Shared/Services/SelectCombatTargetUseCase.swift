@@ -3,7 +3,7 @@ import SpriteKit
 final class SelectCombatTargetUseCase {
     func execute(player: PlayerNode, zombies: [ZombieNode]) -> ZombieNode? {
         let playerPosition = player.position
-        let range = player.currentWeapon.range
+        let range = player.currentWeaponRange
 
         return zombies
             .filter { !$0.isDead }

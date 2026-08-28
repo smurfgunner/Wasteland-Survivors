@@ -4,10 +4,12 @@ final class ProjectileNode: SKNode {
     static let lifetime: TimeInterval = 0.7
 
     let weapon: WeaponType
+    let damage: CGFloat
     private let projectileSpeed: CGFloat = 600
 
-    init(weapon: WeaponType, directionAngle: CGFloat) {
+    init(weapon: WeaponType, damage: CGFloat? = nil, directionAngle: CGFloat) {
         self.weapon = weapon
+        self.damage = damage ?? weapon.damage
         super.init()
 
         zRotation = directionAngle

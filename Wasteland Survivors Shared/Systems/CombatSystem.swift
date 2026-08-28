@@ -46,6 +46,7 @@ final class CombatSystem {
             fireRangedAttack(
                 player: player,
                 weapon: weapon,
+                damage: player.currentWeaponDamage,
                 targetAngle: targetAngle,
                 world: world
             )
@@ -54,6 +55,7 @@ final class CombatSystem {
                 player: player,
                 zombies: zombies,
                 weapon: weapon,
+                range: player.currentWeaponRange,
                 targetAngle: targetAngle,
                 world: world,
                 onDamageZombie: onDamageZombie
@@ -64,6 +66,7 @@ final class CombatSystem {
     private func fireRangedAttack(
         player: PlayerNode,
         weapon: WeaponType,
+        damage: CGFloat,
         targetAngle: CGFloat,
         world: SKNode
     ) {
@@ -74,6 +77,7 @@ final class CombatSystem {
                 from: player.position,
                 angle: targetAngle + offset,
                 weapon: weapon,
+                damage: damage,
                 world: world
             )
         }
@@ -90,9 +94,10 @@ final class CombatSystem {
         from origin: CGPoint,
         angle: CGFloat,
         weapon: WeaponType,
+        damage: CGFloat,
         world: SKNode
     ) {
-        let projectile = ProjectileNode(weapon: weapon, directionAngle: angle)
+        let projectile = ProjectileNode(weapon: weapon, damage: damage, directionAngle: angle)
         projectile.position = CGPoint(
             x: origin.x + cos(angle) * 18,
             y: origin.y + sin(angle) * 18
@@ -105,11 +110,12 @@ final class CombatSystem {
         player: PlayerNode,
         zombies: [ZombieNode],
         weapon: WeaponType,
+        range: CGFloat,
         targetAngle: CGFloat,
         world: SKNode,
         onDamageZombie: (ZombieNode, CGFloat) -> Void
     ) {
-        let slash = MeleeSlashNode(weapon: weapon, angle: targetAngle)
+        let slash = MeleeSlashNode(weapon: weapon, range: range, angle: targetAngle)
         slash.position = player.position
         slash.zPosition = 14
         world.addChild(slash)
