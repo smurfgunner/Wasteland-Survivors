@@ -4,6 +4,7 @@ import SpriteKit
 import Testing
 @testable import Wasteland_Survivors
 
+@MainActor
 @Suite(.serialized)
 struct RenderingTests {
     @Test("Seeded scene produces an identical rendered pixel snapshot")
@@ -16,8 +17,10 @@ struct RenderingTests {
         let secondView = SKView(frame: CGRect(origin: .zero, size: size))
         firstScene.didMove(to: firstView)
         secondScene.didMove(to: secondView)
+        firstScene.startGame()
+        secondScene.startGame()
 
-        // When both scenes are rendered to textures.
+        // When both gameplay scenes are rendered to textures.
         let firstTexture = try #require(firstView.texture(from: firstScene))
         let secondTexture = try #require(secondView.texture(from: secondScene))
         let firstSnapshot = try RenderedPixelSnapshot(texture: firstTexture)

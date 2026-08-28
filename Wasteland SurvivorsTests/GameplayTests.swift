@@ -3,6 +3,7 @@ import SpriteKit
 import Testing
 @testable import Wasteland_Survivors
 
+@MainActor
 @Suite(.serialized)
 struct GameplayTests {
     @Test("A zombie drops a random powerup one time in ten")
@@ -76,6 +77,7 @@ struct GameplayTests {
         )
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
+        scene.startGame()
         let zombie = ZombieNode(randomSource: FixedRandomSource())
         zombie.position = CGPoint(x: 100, y: 0)
         scene.worldNode.addChild(zombie)

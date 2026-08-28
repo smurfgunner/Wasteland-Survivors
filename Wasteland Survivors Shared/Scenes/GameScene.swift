@@ -14,6 +14,11 @@ import AppKit
 #endif
 
 final class GameScene: SKScene {
+    enum MenuState: Equatable {
+        case main
+        case playing
+        case paused
+    }
     
     // MARK: - Core Nodes & Systems
     let worldNode = SKNode()
@@ -41,6 +46,10 @@ final class GameScene: SKScene {
     
     // MARK: - State & Controls
     var isGameOver: Bool = false
+    private(set) var hasStartedGame: Bool = false
+    private(set) var menuState: MenuState = .main
+    private var selectedMenuButtonName = "startButton"
+    var onExitRequested: (() -> Void)?
     var killCount: Int = 0
     var movementVector: CGVector = .zero
     var keysPressed: Set<UInt16> = []
@@ -103,6 +112,7 @@ final class GameScene: SKScene {
         setupPlayer()
         setupWastelandTerrain()
         spawnInitialChests()
+        setupMainMenu()
     }
 
     override func didChangeSize(_ oldSize: CGSize) {
@@ -122,6 +132,10 @@ final class GameScene: SKScene {
                 range: playerNode.currentWeaponRange,
                 fireRate: playerNode.currentWeaponFireRate
             )
+        }
+        if menuState == .main {
+            cameraNode.childNode(withName: "mainMenu")?.removeFromParent()
+            setupMainMenu()
         }
     }
     
@@ -233,7 +247,7 @@ final class GameScene: SKScene {
         let dt = gameTime - lastUpdateTime
         lastUpdateTime = gameTime
         
-        guard !isGameOver else { return }
+        guard menuState == .playing, !isGameOver else { return }
         
         // 1. Player Movement & Camera
         updatePlayerMovement(dt: dt)
@@ -382,6 +396,169 @@ final class GameScene: SKScene {
         )
     }
     
+    // MARK: - Main Menu
+
+    private func setupMainMenu() {
+        let menuNode = makeMenuNode(named: "mainMenu", title: "WASTELAND SURVIVORS")
+        selectedMenuButtonName = "startButton"
+        addMenuButton(named: "startButton", title: "START GAME", position: CGPoint(x: 0, y: 0), to: menuNode)
+        #if os(macOS)
+        addMenuButton(named: "exitButton", title: "EXIT", position: CGPoint(x: 0, y: -80), to: menuNode)
+        #endif
+        updateMenuHighlight(in: menuNode)
+    }
+
+    private func setupPauseMenu() {
+        let menuNode = makeMenuNode(named: "pauseMenu", title: "GAME PAUSED")
+        selectedMenuButtonName = "resumeButton"
+        addMenuButton(named: "resumeButton", title: "RESUME GAME", position: CGPoint(x: 0, y: 0), to: menuNode)
+        addMenuButton(named: "exitToMenuButton", title: "EXIT TO MENU", position: CGPoint(x: 0, y: -80), to: menuNode)
+        updateMenuHighlight(in: menuNode)
+    }
+
+    private func makeMenuNode(named name: String, title: String) -> SKNode {
+        let menuNode = SKNode()
+        menuNode.name = name
+        menuNode.zPosition = 100
+        cameraNode.addChild(menuNode)
+
+        let overlay = SKShapeNode(rectOf: CGSize(width: size.width, height: size.height))
+        overlay.name = "menuOverlay"
+        overlay.fillColor = SKColor(red: 0.04, green: 0.03, blue: 0.02, alpha: 0.92)
+        overlay.strokeColor = .clear
+        menuNode.addChild(overlay)
+
+        let titleLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        titleLabel.text = title
+        titleLabel.fontSize = 42
+        titleLabel.fontColor = .white
+        titleLabel.position = CGPoint(x: 0, y: 100)
+        menuNode.addChild(titleLabel)
+        return menuNode
+    }
+
+    private func addMenuButton(named name: String, title: String, position: CGPoint, to menuNode: SKNode) {
+        let button = SKShapeNode(rectOf: CGSize(width: 280, height: 56), cornerRadius: 10)
+        button.name = name
+        button.position = position
+        button.strokeColor = SKColor(red: 0.95, green: 0.65, blue: 0.25, alpha: 1)
+        button.lineWidth = 2
+
+        let label = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        label.text = title
+        label.fontSize = 22
+        label.fontColor = .white
+        label.verticalAlignmentMode = .center
+        label.name = name
+        button.addChild(label)
+        #if os(tvOS)
+        button.focusBehavior = .focusable
+        #endif
+        menuNode.addChild(button)
+    }
+
+    private func updateMenuHighlight(in menuNode: SKNode) {
+        for button in menuNode.children.compactMap({ $0 as? SKShapeNode }) {
+            button.fillColor = button.name == selectedMenuButtonName
+                ? SKColor(red: 0.85, green: 0.32, blue: 0.08, alpha: 1)
+                : SKColor(red: 0.55, green: 0.19, blue: 0.08, alpha: 1)
+        }
+    }
+
+    func startGame() {
+        guard !hasStartedGame else { return }
+        hasStartedGame = true
+        menuState = .playing
+        cameraNode.childNode(withName: "mainMenu")?.removeFromParent()
+    }
+
+    func pauseGame() {
+        guard menuState == .playing, !isGameOver else { return }
+        menuState = .paused
+        selectedMenuButtonName = "resumeButton"
+        setupPauseMenu()
+    }
+
+    func resumeGame() {
+        guard menuState == .paused else { return }
+        menuState = .playing
+        cameraNode.childNode(withName: "pauseMenu")?.removeFromParent()
+    }
+
+    func exitToMainMenu() {
+        guard menuState == .paused else { return }
+        restartGame()
+        menuState = .main
+        hasStartedGame = false
+        selectedMenuButtonName = "startButton"
+        cameraNode.childNode(withName: "pauseMenu")?.removeFromParent()
+        setupMainMenu()
+    }
+
+    func handleMenuInput(at location: CGPoint) {
+        let menuName = menuState == .paused ? "pauseMenu" : "mainMenu"
+        guard menuState != .playing,
+              let menuNode = cameraNode.childNode(withName: menuName),
+              let node = menuNode.atPoint(location).name else { return }
+
+        switch node {
+        case "startButton":
+            startGame()
+        case "exitButton":
+            onExitRequested?()
+        case "resumeButton":
+            resumeGame()
+        case "exitToMenuButton":
+            exitToMainMenu()
+        default:
+            break
+        }
+    }
+
+    private func moveMenuSelection(down: Bool) {
+        let names: [String]
+        switch menuState {
+        case .main:
+            #if os(macOS)
+            names = ["startButton", "exitButton"]
+            #else
+            names = ["startButton"]
+            #endif
+        case .paused:
+            names = ["resumeButton", "exitToMenuButton"]
+        case .playing:
+            return
+        }
+
+        guard let currentIndex = names.firstIndex(of: selectedMenuButtonName) else {
+            selectedMenuButtonName = names[0]
+            return
+        }
+        let nextIndex = down
+            ? (currentIndex + 1) % names.count
+            : (currentIndex - 1 + names.count) % names.count
+        selectedMenuButtonName = names[nextIndex]
+        let menuName = menuState == .paused ? "pauseMenu" : "mainMenu"
+        if let menuNode = cameraNode.childNode(withName: menuName) {
+            updateMenuHighlight(in: menuNode)
+        }
+    }
+
+    private func activateSelectedMenuButton() {
+        switch selectedMenuButtonName {
+        case "startButton":
+            startGame()
+        case "exitButton":
+            onExitRequested?()
+        case "resumeButton":
+            resumeGame()
+        case "exitToMenuButton":
+            exitToMainMenu()
+        default:
+            break
+        }
+    }
+
     // MARK: - Game Lifecycle & Reset
     private func triggerGameOver() {
         isGameOver = true
@@ -408,6 +585,8 @@ final class GameScene: SKScene {
         
         zombieSpawnInterval = initialZombieSpawnInterval
         isGameOver = false
+        hasStartedGame = true
+        menuState = .playing
         
         spawnInitialChests()
     }
@@ -455,12 +634,16 @@ extension GameScene: SKPhysicsContactDelegate {
 #if os(iOS) || os(tvOS)
 extension GameScene {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        if !hasStartedGame {
+            handleMenuInput(at: touch.location(in: cameraNode))
+            return
+        }
         if isGameOver {
             restartGame()
             return
         }
         
-        guard let touch = touches.first else { return }
         let location = touch.location(in: hudManager.containerNode)
         
         isJoystickActive = true
@@ -504,6 +687,12 @@ extension GameScene {
     
     #if os(tvOS)
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !hasStartedGame {
+            if presses.contains(where: { $0.type == .select }) {
+                startGame()
+            }
+            return
+        }
         if isGameOver {
             restartGame()
             return
@@ -535,6 +724,24 @@ extension GameScene {
 #if os(macOS)
 extension GameScene {
     override func keyDown(with event: NSEvent) {
+        if menuState != .playing {
+            switch event.keyCode {
+            case 126:
+                moveMenuSelection(down: false)
+            case 125:
+                moveMenuSelection(down: true)
+            case 36, 49:
+                activateSelectedMenuButton()
+            default:
+                break
+            }
+            return
+        }
+
+        if event.keyCode == 53 {
+            pauseGame()
+            return
+        }
         if isGameOver {
             restartGame()
             return
@@ -544,6 +751,10 @@ extension GameScene {
     
     override func keyUp(with event: NSEvent) {
         keysPressed.remove(event.keyCode)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        handleMenuInput(at: event.location(in: cameraNode))
     }
 }
 #endif
