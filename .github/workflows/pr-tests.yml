@@ -1,0 +1,49 @@
+name: PR Tests
+
+on:
+  pull_request:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test ${{ matrix.platform }}
+    runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            scheme: Wasteland Survivors iOS
+            test_plan: Wasteland Survivors iOS
+            destination: platform=iOS Simulator,OS=latest
+          - platform: tvOS
+            scheme: Wasteland Survivors tvOS
+            test_plan: Wasteland Survivors tvOS
+            destination: platform=tvOS Simulator,OS=latest
+          - platform: macOS
+            scheme: Wasteland Survivors macOS
+            test_plan: Wasteland Survivors macOS
+            destination: platform=macOS
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run tests
+        run: |
+          xcodebuild \
+            -project "Wasteland Survivors.xcodeproj" \
+            -scheme "${{ matrix.scheme }}" \
+            -testPlan "${{ matrix.test_plan }}" \
+            -destination "${{ matrix.destination }}" \
+            test \
+            CODE_SIGNING_ALLOWED=NO
