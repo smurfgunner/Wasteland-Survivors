@@ -22,6 +22,58 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Create project version bump PR targeting develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git fetch origin main develop --quiet
+
+          LATEST_VERSION=$(gh release list --repo "$GH_REPO" --limit 100 --json tagName --jq '[.[].tagName | select(test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v"; "")] | sort_by(split(".") | map(tonumber)) | last // "1.0.0"')
+          IFS='.' read -r MAJOR MINOR _ <<< "$LATEST_VERSION"
+          RELEASE_VERSION="${MAJOR}.$((MINOR + 1)).0"
+
+          git switch --force-create develop origin/develop
+          PROJECT_FILE="Wasteland Survivors.xcodeproj/project.pbxproj"
+          CURRENT_BUILD=$(awk -F' = ' '/CURRENT_PROJECT_VERSION = / { gsub(";", "", $2); print $2; exit }' "$PROJECT_FILE")
+          NEXT_BUILD=$((CURRENT_BUILD + 1))
+
+          sed -i -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $RELEASE_VERSION;/g" "$PROJECT_FILE"
+          sed -i -E "s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $NEXT_BUILD;/g" "$PROJECT_FILE"
+
+          if git diff --quiet -- "$PROJECT_FILE"; then
+            echo "The develop branch already uses the requested project version values."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$PROJECT_FILE"
+            git commit -m "chore: bump project version to $RELEASE_VERSION"
+
+            BRANCH_NAME="release/v$RELEASE_VERSION"
+            git switch -c "$BRANCH_NAME"
+            git push --force origin "$BRANCH_NAME"
+
+            EXISTING_VERSION_PR=$(gh pr list \
+              --repo "$GH_REPO" \
+              --base develop \
+              --head "$BRANCH_NAME" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty')
+
+            if [ -n "$EXISTING_VERSION_PR" ]; then
+              echo "Version bump PR #$EXISTING_VERSION_PR already exists."
+            else
+              gh pr create \
+                --repo "$GH_REPO" \
+                --base develop \
+                --head "$BRANCH_NAME" \
+                --title "chore: bump project version to $RELEASE_VERSION" \
+                --body "Automated version bump for release $RELEASE_VERSION. Marketing version: $RELEASE_VERSION. Build number: $NEXT_BUILD."
+            fi
+          fi
+
       - name: Build changelog and create or update PR
         env:
           GH_TOKEN: ${{ github.token }}
