@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build-macos-dmg:
     # Version-sync PR merges must not start a second release.
-    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: sync project version to ') }}
+    if: "${{ !contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: sync project version to ') }}"
     runs-on: xcode-27
     env:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
