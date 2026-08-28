@@ -57,6 +57,7 @@ jobs:
             printf '%s' "$CHANGELOG"
             echo
             echo "This PR was created automatically from \`develop\` into \`main\`."
+            echo "Merge this PR with a merge commit (do not squash) to preserve branch history and enable selective rollbacks."
           } > "$BODY"
 
           EXISTING_PR=$(gh pr list \
