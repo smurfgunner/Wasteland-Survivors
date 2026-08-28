@@ -16,6 +16,10 @@ private final class FixedRandomSource: RandomSource {
     }
 }
 
+private final class TestClock {
+    var now: TimeInterval = 0
+}
+
 private struct VisualRegressionBaselineManifest: Decodable {
     let nodeCount: Int
     let structuralFingerprint: String
@@ -377,12 +381,12 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(!scene.isGameOver)
     }
     
-    @Test("Game loop spawns a zombie after the spawn interval")
-    func gameLoopSpawnsZombieAfterSpawnInterval() {
+    @Test("Game loop spawns zombies at the three-times faster spawn interval")
+    func gameLoopSpawnsZombieAtThreeTimesFasterSpawnInterval() {
         let scene = makeScene()
         
         scene.update(1)
-        scene.update(3.1)
+        scene.update(1.7)
         
         #expect(scene.zombies.count == 1)
         #expect(scene.zombies.first?.parent === scene.worldNode)
@@ -402,8 +406,17 @@ struct WastelandSurvivorsIntegrationTests {
     
     @Test("Game loop removes dead zombies after they leave the scene")
     func gameLoopRemovesDeadZombiesAfterTheyLeaveTheScene() {
-        let scene = makeScene()
+        let clock = TestClock()
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            clock: { _ in clock.now }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+
+        clock.now = 1
         scene.update(1)
+        clock.now = 3.1
         scene.update(3.1)
         
         let zombie = scene.zombies[0]
