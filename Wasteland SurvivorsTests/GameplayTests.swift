@@ -19,6 +19,7 @@ struct GameplayTests {
 
         #expect(player.currentWeaponDamage == WeaponType.pistol.damage)
         #expect(player.currentWeaponRange == WeaponType.pistol.range)
+        #expect(player.currentWeaponFireRate == WeaponType.pistol.fireRate)
         #expect(player.apply(powerUp: .damage))
         #expect(!player.apply(powerUp: .damage))
         #expect(player.currentWeaponDamage == WeaponType.pistol.damage * 1.25)
@@ -27,12 +28,18 @@ struct GameplayTests {
         #expect(!player.apply(powerUp: .range))
         #expect(player.currentWeaponRange == WeaponType.pistol.range * 1.25)
 
+        #expect(player.apply(powerUp: .fireRate))
+        #expect(!player.apply(powerUp: .fireRate))
+        #expect(player.currentWeaponFireRate == WeaponType.pistol.fireRate * 0.75)
+
         player.equip(weapon: .rifle)
         #expect(player.currentWeaponDamage == WeaponType.rifle.damage)
         #expect(player.currentWeaponRange == WeaponType.rifle.range)
+        #expect(player.currentWeaponFireRate == WeaponType.rifle.fireRate)
         player.equip(weapon: .pistol)
         #expect(player.currentWeaponDamage == WeaponType.pistol.damage)
         #expect(player.currentWeaponRange == WeaponType.pistol.range)
+        #expect(player.currentWeaponFireRate == WeaponType.pistol.fireRate)
     }
 
     @Test("Weapon upgrades are used by combat range and damage")

@@ -12,6 +12,23 @@ private struct VisualRegressionBaselineManifest: Decodable {
 
 @Suite(.serialized)
 struct VisualSceneTests {
+    @Test("Every powerup has a distinct visual identity")
+    func everyPowerUpHasDistinctVisualIdentity() {
+        // Given one visual node for every supported powerup.
+        let powerUpNodes = PowerUpType.allCases.map(PowerUpNode.init)
+
+        // When each node is reduced to its visible glow color and symbol rotation.
+        let visualSignatures = powerUpNodes.map { node in
+            let shapeNodes = node.children.compactMap { $0 as? SKShapeNode }
+            let glowSignature = shapeNodes.first?.fillColor.description ?? ""
+            let symbolSignature = shapeNodes.dropFirst().first?.zRotation ?? 0
+            return "\(glowSignature)|\(symbolSignature)"
+        }
+
+        // Then no two powerups share the same visual identity.
+        #expect(Set(visualSignatures).count == PowerUpType.allCases.count)
+    }
+
     @Test("A seeded visual scenario builds the same world twice")
     func seededVisualScenarioBuildsTheSameWorldTwice() throws {
         // Given a fixed viewport and identical replay seeds.

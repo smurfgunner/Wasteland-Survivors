@@ -20,6 +20,10 @@ final class PlayerNode: SKNode {
     var currentWeaponRange: CGFloat {
         currentWeapon.range * (appliedPowerUps.contains(.range) ? 1.25 : 1)
     }
+
+    var currentWeaponFireRate: TimeInterval {
+        currentWeapon.fireRate * (appliedPowerUps.contains(.fireRate) ? 0.75 : 1)
+    }
     
     let healthRegenerationDelay: TimeInterval = 4
     let healthRegenerationRate: CGFloat = 10
@@ -82,7 +86,7 @@ final class PlayerNode: SKNode {
     }
     
     func canFire(currentTime: TimeInterval) -> Bool {
-        return currentTime - lastFireTime >= currentWeapon.fireRate
+        return currentTime - lastFireTime >= currentWeaponFireRate
     }
     
     func recordFire(currentTime: TimeInterval) {

@@ -5,6 +5,99 @@ import Testing
 
 @Suite(.serialized)
 struct GameSceneIntegrationTests {
+    @Test("Collecting a damage powerup updates the weapon HUD damage")
+    func collectingDamagePowerUpUpdatesWeaponHUDDamage() {
+        let scene = makeScene()
+        let powerUp = PowerUpNode(powerUp: .damage)
+
+        scene.collectPowerUp(powerUp)
+
+        let weaponBadge = scene.hudManager.containerNode.children
+            .compactMap { $0 as? SKLabelNode }
+            .first { $0.text?.contains("DMG:") == true }
+        #expect(weaponBadge?.text?.contains("DMG: 37") == true)
+    }
+
+    @Test("Collecting a range powerup updates the weapon HUD range")
+    func collectingRangePowerUpUpdatesWeaponHUDRange() {
+        let scene = makeScene()
+        let powerUp = PowerUpNode(powerUp: .range)
+
+        scene.collectPowerUp(powerUp)
+
+        let weaponBadge = scene.hudManager.containerNode.children
+            .compactMap { $0 as? SKLabelNode }
+            .first { $0.text?.contains("RNG:") == true }
+        #expect(weaponBadge?.text?.contains("RNG: 350") == true)
+    }
+
+    @Test("Collecting a fire rate powerup updates the weapon HUD fire rate")
+    func collectingFireRatePowerUpUpdatesWeaponHUDFireRate() {
+        let scene = makeScene()
+        let powerUp = PowerUpNode(powerUp: .fireRate)
+
+        scene.collectPowerUp(powerUp)
+
+        let weaponBadge = scene.hudManager.containerNode.children
+            .compactMap { $0 as? SKLabelNode }
+            .first { $0.text?.contains("FIR:") == true }
+        #expect(weaponBadge?.text?.contains("FIR: 0.26") == true)
+    }
+
+    @Test("Weapon HUD stats fit inside the weapon panel")
+    func weaponHUDStatsFitInsideWeaponPanel() {
+        // Given a fully initialized game HUD.
+        let scene = makeScene()
+        let weaponPanel = scene.hudManager.containerNode.children
+            .compactMap { $0 as? SKShapeNode }
+            .first { $0.name == "weaponPanel" }
+        let statsLabel = scene.hudManager.containerNode.children
+            .compactMap { $0 as? SKLabelNode }
+            .first { $0.text?.contains("DMG:") == true }
+
+        // When the weapon stats are rendered.
+        let panelFrame = weaponPanel?.frame ?? .zero
+        let statsFrame = statsLabel?.frame ?? .zero
+
+        // Then all stats remain inside the weapon panel.
+        #expect(statsFrame.minX >= panelFrame.minX)
+        #expect(statsFrame.maxX <= panelFrame.maxX)
+    }
+
+    @Test("Every on-screen HUD element stays inside the resized screen")
+    func everyOnScreenHUDElementStaysInsideResizedScreen() {
+        // Given a HUD created at one size and then resized to a fullscreen-like viewport.
+        let scene = makeScene()
+        let oldSize = scene.size
+        let resizedSize = CGSize(width: 1920, height: 1080)
+        scene.size = resizedSize
+        scene.didChangeSize(oldSize)
+        scene.hudManager.updateHealth(
+            current: 25,
+            max: scene.playerNode.maxHealth,
+            sceneWidth: resizedSize.width
+        )
+
+        let screenFrame = CGRect(
+            x: -resizedSize.width / 2,
+            y: -resizedSize.height / 2,
+            width: resizedSize.width,
+            height: resizedSize.height
+        )
+        let hudElements = scene.hudManager.containerNode.children
+        let healthBar = hudElements.first { $0.name == "healthBar" }
+        let healthFill = hudElements.first { $0.name == "healthBarFill" }
+
+        // Then every persistent HUD element is inside the visible screen.
+        #expect(hudElements.count == 9)
+        for element in hudElements {
+            #expect(screenFrame.contains(element.frame))
+        }
+
+        // And the resized health fill remains inside its background.
+        #expect(healthBar?.frame.contains(healthFill?.frame ?? .zero) == true)
+    }
+
     @Test("Game scene batches static terrain into two render nodes")
     func gameSceneBatchesStaticTerrainIntoTwoRenderNodes() {
         let scene = makeScene()

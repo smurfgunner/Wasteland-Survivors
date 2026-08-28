@@ -98,6 +98,26 @@ final class GameScene: SKScene {
         setupWastelandTerrain()
         spawnInitialChests()
     }
+
+    override func didChangeSize(_ oldSize: CGSize) {
+        super.didChangeSize(oldSize)
+        guard cameraNode.parent != nil else { return }
+
+        hudManager.setup(in: cameraNode, sceneSize: size)
+        hudManager.updateHealth(
+            current: playerNode?.currentHealth ?? 100,
+            max: playerNode?.maxHealth ?? 100,
+            sceneWidth: size.width
+        )
+        if let playerNode {
+            hudManager.updateWeapon(
+                weapon: playerNode.currentWeapon,
+                damage: playerNode.currentWeaponDamage,
+                range: playerNode.currentWeaponRange,
+                fireRate: playerNode.currentWeaponFireRate
+            )
+        }
+    }
     
     // MARK: - Setup
     private func setupWorld() {
@@ -310,10 +330,16 @@ final class GameScene: SKScene {
         powerUps.append(node)
     }
 
-    private func collectPowerUp(_ powerUp: PowerUpNode) {
+    func collectPowerUp(_ powerUp: PowerUpNode) {
         guard playerNode.apply(powerUp: powerUp.powerUp) else { return }
 
         powerUp.removeFromParent()
+        hudManager.updateWeapon(
+            weapon: playerNode.currentWeapon,
+            damage: playerNode.currentWeaponDamage,
+            range: playerNode.currentWeaponRange,
+            fireRate: playerNode.currentWeaponFireRate
+        )
         hudManager.showNotification(text: "POWERUP: \(powerUp.powerUp.title)")
     }
     

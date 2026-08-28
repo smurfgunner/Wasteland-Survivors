@@ -7,8 +7,19 @@ final class PowerUpNode: SKNode {
         self.powerUp = powerUp
         super.init()
 
+        let (glowColor, symbolRotation): (SKColor, CGFloat) = {
+            switch powerUp {
+            case .damage:
+                return (.systemRed, 0)
+            case .range:
+                return (.systemPurple, CGFloat.pi / 2)
+            case .fireRate:
+                return (.systemGreen, CGFloat.pi / 4)
+            }
+        }()
+
         let glow = SKShapeNode(circleOfRadius: 12)
-        glow.fillColor = powerUp == .damage ? .systemRed : .systemPurple
+        glow.fillColor = glowColor
         glow.strokeColor = .white
         glow.lineWidth = 2
         addChild(glow)
@@ -16,7 +27,7 @@ final class PowerUpNode: SKNode {
         let symbol = SKShapeNode(rectOf: CGSize(width: 4, height: 16), cornerRadius: 2)
         symbol.fillColor = .white
         symbol.strokeColor = .clear
-        symbol.zRotation = powerUp == .damage ? 0 : CGFloat.pi / 2
+        symbol.zRotation = symbolRotation
         addChild(symbol)
 
         let body = SKPhysicsBody(circleOfRadius: 14)
