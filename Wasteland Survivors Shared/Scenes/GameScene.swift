@@ -17,6 +17,12 @@ final class GameScene: SKScene {
     
     // MARK: - Core Nodes & Systems
     let worldNode = SKNode()
+    private let terrainNode: SKEffectNode = {
+        let node = SKEffectNode()
+        node.name = "rasterizedTerrain"
+        node.shouldRasterize = true
+        return node
+    }()
     let cameraNode = SKCameraNode()
     let hudManager = HUDManager()
     let combatSystem = CombatSystem()
@@ -145,6 +151,10 @@ final class GameScene: SKScene {
     }
     
     private func setupWastelandTerrain() {
+        // Terrain never changes during gameplay, so render its shape hierarchy once
+        // into an effect-node cache instead of tessellating every shape each frame.
+        worldNode.addChild(terrainNode)
+
         let mapRadius: CGFloat = 3000
         let gridStep: CGFloat = 160
         
@@ -160,7 +170,7 @@ final class GameScene: SKScene {
                     rock.strokeColor = .clear
                     rock.position = CGPoint(x: x + randomSource.nextCGFloat(in: -40...40), y: y + randomSource.nextCGFloat(in: -40...40))
                     rock.zPosition = 1
-                    worldNode.addChild(rock)
+                    terrainNode.addChild(rock)
                 } else if seed < 22 {
                     let crack = SKShapeNode(rectOf: CGSize(width: randomSource.nextCGFloat(in: 20...50), height: randomSource.nextCGFloat(in: 3...6)), cornerRadius: 2)
                     crack.fillColor = SKColor(red: 0.08, green: 0.07, blue: 0.06, alpha: 0.7)
@@ -168,7 +178,7 @@ final class GameScene: SKScene {
                     crack.zRotation = randomSource.nextCGFloat(in: 0...CGFloat.pi)
                     crack.position = CGPoint(x: x, y: y)
                     crack.zPosition = 1
-                    worldNode.addChild(crack)
+                    terrainNode.addChild(crack)
                 }
             }
         }
