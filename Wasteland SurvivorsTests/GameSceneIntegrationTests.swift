@@ -98,15 +98,16 @@ struct GameSceneIntegrationTests {
         #expect(healthBar?.frame.contains(healthFill?.frame ?? .zero) == true)
     }
 
-    @Test("Game scene batches static terrain into two render nodes")
-    func gameSceneBatchesStaticTerrainIntoTwoRenderNodes() {
+    @Test("Game scene rasterizes static terrain into one cached render node")
+    func gameSceneRasterizesStaticTerrainIntoOneCachedRenderNode() {
         let scene = makeScene()
-        let terrainNodes = scene.worldNode.children.filter { node in
-            node.zPosition == 1
-        }
+        let terrainNode = scene.worldNode.children.first { $0.name == "rasterizedTerrain" }
         
-        // Then terrain remains represented by its individual visual nodes before optimization.
-        #expect(terrainNodes.count == 347)
+        // Then terrain is represented by one cached render node instead of
+        // submitting every static shape as a separate world-level render node.
+        #expect(scene.worldNode.children.filter { $0.name == "rasterizedTerrain" }.count == 1)
+        #expect(terrainNode is SKEffectNode)
+        #expect((terrainNode as? SKEffectNode)?.shouldRasterize == true)
     }
     
     @Test("Game scene creates the playable world with real nodes")

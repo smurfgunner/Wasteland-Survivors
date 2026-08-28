@@ -71,10 +71,13 @@ struct VisualSceneTests {
         let scene = makeScene()
 
         // When the static terrain is inspected.
-        let terrainShapeCount = scene.worldNode.children.filter { $0 is SKShapeNode }.count
+        let terrainNode = scene.worldNode.children.first { $0.name == "rasterizedTerrain" }
 
-        // Then rocks and cracks remain individually renderable visual elements.
-        #expect(terrainShapeCount > 100)
+        // Then the terrain is cached as one rasterized effect node while its source
+        // shapes remain available for visual regression and cache generation.
+        #expect(terrainNode is SKEffectNode)
+        #expect((terrainNode as? SKEffectNode)?.shouldRasterize == true)
+        #expect((terrainNode as? SKEffectNode)?.children.count ?? 0 > 100)
     }
 
     @Test("Player uses the expected shape-based visual composition")
