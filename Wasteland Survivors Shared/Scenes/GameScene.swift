@@ -25,11 +25,13 @@ final class GameScene: SKScene {
     private let randomSource: RandomSource
     private let clock: (TimeInterval) -> TimeInterval
     private let selectWeaponRewardUseCase: SelectWeaponRewardUseCase
+    private let selectPowerUpDropUseCase: SelectPowerUpDropUseCase
     private let effectsRenderer: GameEffectsRenderer
     
     private(set) var playerNode: PlayerNode!
     private(set) var zombies: [ZombieNode] = []
     private(set) var chests: [ChestNode] = []
+    private(set) var powerUps: [PowerUpNode] = []
     
     // MARK: - State & Controls
     var isGameOver: Bool = false
@@ -60,6 +62,7 @@ final class GameScene: SKScene {
         self.randomSource = randomSource
         self.clock = clock
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
+        selectPowerUpDropUseCase = SelectPowerUpDropUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
         super.init(size: size)
     }
@@ -69,6 +72,7 @@ final class GameScene: SKScene {
         self.randomSource = randomSource
         self.clock = { $0 }
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
+        selectPowerUpDropUseCase = SelectPowerUpDropUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
         super.init(coder: aDecoder)
     }
@@ -230,6 +234,7 @@ final class GameScene: SKScene {
         // 6. Cleanup
         zombies.removeAll { $0.isDead && $0.parent == nil }
         chests.removeAll { $0.isOpened && $0.parent == nil }
+        powerUps.removeAll { $0.parent == nil }
     }
     
     private func updatePlayerMovement(dt: TimeInterval) {
@@ -291,7 +296,25 @@ final class GameScene: SKScene {
             killCount += 1
             hudManager.updateKillCount(killCount)
             effectsRenderer.renderEnemyDefeat(at: zombie.position, in: worldNode)
+            spawnPowerUpIfSelected(at: zombie.position)
         }
+    }
+
+    private func spawnPowerUpIfSelected(at position: CGPoint) {
+        guard let powerUp = selectPowerUpDropUseCase.execute() else { return }
+
+        let node = PowerUpNode(powerUp: powerUp)
+        node.position = position
+        node.zPosition = 7
+        worldNode.addChild(node)
+        powerUps.append(node)
+    }
+
+    private func collectPowerUp(_ powerUp: PowerUpNode) {
+        guard playerNode.apply(powerUp: powerUp.powerUp) else { return }
+
+        powerUp.removeFromParent()
+        hudManager.showNotification(text: "POWERUP: \(powerUp.powerUp.title)")
     }
     
     private func playerTakeDamage(amount: CGFloat) {
@@ -336,6 +359,8 @@ final class GameScene: SKScene {
         zombies.removeAll()
         chests.forEach { $0.removeFromParent() }
         chests.removeAll()
+        powerUps.forEach { $0.removeFromParent() }
+        powerUps.removeAll()
         
         playerNode.reset()
         playerNode.position = .zero
@@ -377,6 +402,14 @@ extension GameScene: SKPhysicsContactDelegate {
             let chestBody = maskA == PhysicsCategory.chest ? contact.bodyA : contact.bodyB
             if let chest = chestBody.node as? ChestNode, !chest.isOpened {
                 openChest(chest)
+            }
+        }
+
+        if (maskA == PhysicsCategory.player && maskB == PhysicsCategory.powerUp) ||
+           (maskB == PhysicsCategory.player && maskA == PhysicsCategory.powerUp) {
+            let powerUpBody = maskA == PhysicsCategory.powerUp ? contact.bodyA : contact.bodyB
+            if let powerUp = powerUpBody.node as? PowerUpNode {
+                collectPowerUp(powerUp)
             }
         }
     }

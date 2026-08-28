@@ -11,6 +11,15 @@ final class PlayerNode: SKNode {
     let maxHealth: CGFloat = 100
     private(set) var currentHealth: CGFloat = 100
     private(set) var currentWeapon: WeaponType = .pistol
+    private var appliedPowerUps: Set<PowerUpType> = []
+
+    var currentWeaponDamage: CGFloat {
+        currentWeapon.damage * (appliedPowerUps.contains(.damage) ? 1.25 : 1)
+    }
+
+    var currentWeaponRange: CGFloat {
+        currentWeapon.range * (appliedPowerUps.contains(.range) ? 1.25 : 1)
+    }
     
     let healthRegenerationDelay: TimeInterval = 4
     let healthRegenerationRate: CGFloat = 10
@@ -52,7 +61,7 @@ final class PlayerNode: SKNode {
         let body = SKPhysicsBody(circleOfRadius: 16)
         body.isDynamic = true
         body.categoryBitMask = PhysicsCategory.player
-        body.contactTestBitMask = PhysicsCategory.zombie | PhysicsCategory.chest
+        body.contactTestBitMask = PhysicsCategory.zombie | PhysicsCategory.chest | PhysicsCategory.powerUp
         body.collisionBitMask = PhysicsCategory.none
         body.allowsRotation = false
         physicsBody = body
@@ -82,7 +91,14 @@ final class PlayerNode: SKNode {
     
     func equip(weapon: WeaponType) {
         self.currentWeapon = weapon
+        appliedPowerUps.removeAll()
         gunSprite.fillColor = weapon.color
+    }
+
+    @discardableResult
+    func apply(powerUp: PowerUpType) -> Bool {
+        guard appliedPowerUps.insert(powerUp).inserted else { return false }
+        return true
     }
     
     func takeDamage(amount: CGFloat) {
@@ -125,6 +141,7 @@ final class PlayerNode: SKNode {
         currentHealth = maxHealth
         regenerationCooldownRemaining = 0
         currentWeapon = .pistol
+        appliedPowerUps.removeAll()
         equip(weapon: .pistol)
     }
 }

@@ -17,7 +17,7 @@ final class ResolveMeleeHitsUseCase {
                 zombiePosition.y - playerPosition.y
             )
 
-            guard distance <= weapon.range else {
+            guard distance <= player.currentWeaponRange else {
                 continue
             }
 
@@ -34,7 +34,7 @@ final class ResolveMeleeHitsUseCase {
                 continue
             }
 
-            onHit(zombie, weapon.damage)
+            onHit(zombie, player.currentWeaponDamage)
         }
     }
 

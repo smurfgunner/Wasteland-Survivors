@@ -91,7 +91,7 @@ final class ZombieNode: SKNode {
     
     func takeDamage(amount: CGFloat) {
         guard !isDead else { return }
-        health -= amount
+        health = Swift.max(0, health - amount)
         
         let ratio = max(0, health / 60)
         healthBar.xScale = ratio
