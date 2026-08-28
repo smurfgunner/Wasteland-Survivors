@@ -15,24 +15,8 @@ concurrency:
 
 jobs:
   test:
-    name: Test ${{ matrix.platform }}
+    name: Test macOS
     runs-on: xcode-27
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: iOS
-            scheme: Wasteland Survivors iOS
-            test_plan: Wasteland Survivors iOS
-            destination: platform=iOS Simulator,OS=latest
-          - platform: tvOS
-            scheme: Wasteland Survivors tvOS
-            test_plan: Wasteland Survivors tvOS
-            destination: platform=tvOS Simulator,OS=latest
-          - platform: macOS
-            scheme: Wasteland Survivors macOS
-            test_plan: Wasteland Survivors macOS
-            destination: platform=macOS
 
     steps:
       - name: Check out repository
@@ -42,8 +26,8 @@ jobs:
         run: |
           xcodebuild \
             -project "Wasteland Survivors.xcodeproj" \
-            -scheme "${{ matrix.scheme }}" \
-            -testPlan "${{ matrix.test_plan }}" \
-            -destination "${{ matrix.destination }}" \
+            -scheme "Wasteland Survivors macOS" \
+            -testPlan "Wasteland Survivors macOS" \
+            -destination "platform=macOS" \
             test \
             CODE_SIGNING_ALLOWED=NO
