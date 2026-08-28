@@ -1,8 +1,12 @@
 import Foundation
 import SpriteKit
 import Testing
+#if os(macOS)
+import AppKit
+#endif
 @testable import Wasteland_Survivors
 
+@MainActor
 @Suite(.serialized)
 struct GameSceneIntegrationTests {
     @Test("Collecting a damage powerup updates the weapon HUD damage")
@@ -110,12 +114,143 @@ struct GameSceneIntegrationTests {
         #expect((terrainNode as? SKEffectNode)?.shouldRasterize == true)
     }
     
+    @Test("Game scene presents a start and exit menu before gameplay")
+    func gameScenePresentsMainMenuBeforeGameplay() {
+        // Given a newly presented game scene.
+        let scene = makeScene(started: false)
+
+        // Then the menu is visible and gameplay has not started.
+        #expect(scene.hasStartedGame == false)
+        #expect(scene.cameraNode.childNode(withName: "mainMenu") != nil)
+        #expect(scene.cameraNode.childNode(withName: "mainMenu")?.childNode(withName: "startButton") != nil)
+        #expect(scene.cameraNode.childNode(withName: "mainMenu")?.childNode(withName: "exitButton") != nil)
+    }
+
+    @Test("Starting from the main menu enables gameplay")
+    func startingFromMainMenuEnablesGameplay() {
+        // Given a newly presented game scene.
+        let scene = makeScene(started: false)
+
+        // When the player starts the game.
+        scene.startGame()
+
+        // Then the menu is removed and gameplay is enabled.
+        #expect(scene.hasStartedGame)
+        #expect(scene.cameraNode.childNode(withName: "mainMenu") == nil)
+    }
+
+    @Test("Selecting exit from the main menu invokes the host exit handler")
+    func selectingExitFromMainMenuInvokesHostExitHandler() {
+        // Given a newly presented game scene with a host exit handler.
+        let scene = makeScene(started: false)
+        var didRequestExit = false
+        scene.onExitRequested = { didRequestExit = true }
+
+        // When the exit button is selected.
+        scene.handleMenuInput(at: CGPoint(x: 0, y: -80))
+
+        // Then the host is notified.
+        #expect(didRequestExit)
+    }
+
+    @Test("The main menu highlights its default action")
+    func mainMenuHighlightsItsDefaultAction() {
+        // Given a newly presented main menu.
+        let scene = makeScene(started: false)
+        let menu = scene.cameraNode.childNode(withName: "mainMenu")
+        let startButton = menu?.childNode(withName: "startButton") as? SKShapeNode
+
+        #if os(macOS)
+        let exitButton = menu?.childNode(withName: "exitButton") as? SKShapeNode
+
+        // Then Start Game is visibly highlighted over Exit.
+        #expect(startButton?.fillColor != exitButton?.fillColor)
+        #else
+        // Then the mobile/tv menu contains no unsupported Exit action.
+        #expect(menu?.childNode(withName: "exitButton") == nil)
+        #expect(startButton != nil)
+        #endif
+    }
+
+    @Test("Gameplay remains paused until the main menu starts the game")
+    func gameplayRemainsPausedUntilMainMenuStartsTheGame() {
+        // Given a scene that is still displaying its main menu.
+        let scene = makeScene(started: false)
+
+        // When the scene receives update ticks.
+        scene.update(1)
+        scene.update(1.7)
+
+        // Then no gameplay enemies have spawned.
+        #expect(scene.zombies.isEmpty)
+
+        // When Start Game is selected.
+        scene.startGame()
+        scene.update(2.4)
+
+        // Then the gameplay loop is active.
+        #expect(scene.zombies.count == 1)
+    }
+
+    #if os(macOS)
+    @Test("Escape opens the pause menu and stops gameplay updates")
+    func escapeOpensPauseMenuAndStopsGameplayUpdates() throws {
+        // Given an active game.
+        let scene = makeScene()
+        scene.update(1)
+        scene.update(1.7)
+        let zombieCount = scene.zombies.count
+
+        // When Escape is pressed.
+        scene.keyDown(with: try keyEvent(keyCode: 53))
+        scene.update(3)
+
+        // Then the pause menu is shown and gameplay is frozen.
+        #expect(scene.menuState == .paused)
+        #expect(scene.cameraNode.childNode(withName: "pauseMenu") != nil)
+        #expect(scene.zombies.count == zombieCount)
+    }
+
+    @Test("Resume returns from the pause menu to active gameplay")
+    func resumeReturnsFromPauseMenuToActiveGameplay() throws {
+        // Given a paused game.
+        let scene = makeScene()
+        scene.keyDown(with: try keyEvent(keyCode: 53))
+
+        // When Resume Game is selected with Return.
+        scene.keyDown(with: try keyEvent(keyCode: 36))
+
+        // Then gameplay is active and the pause menu is gone.
+        #expect(scene.menuState == .playing)
+        #expect(scene.hasStartedGame)
+        #expect(scene.cameraNode.childNode(withName: "pauseMenu") == nil)
+    }
+
+    @Test("Exit to Menu returns a paused game to the main menu")
+    func exitToMenuReturnsAPausedGameToTheMainMenu() throws {
+        // Given a paused game.
+        let scene = makeScene()
+        scene.keyDown(with: try keyEvent(keyCode: 53))
+
+        // When Exit to Menu is selected.
+        scene.keyDown(with: try keyEvent(keyCode: 125))
+        scene.keyDown(with: try keyEvent(keyCode: 36))
+
+        // Then the main menu is restored and gameplay is no longer active.
+        #expect(scene.menuState == .main)
+        #expect(scene.hasStartedGame == false)
+        #expect(scene.cameraNode.childNode(withName: "mainMenu") != nil)
+        #expect(scene.cameraNode.childNode(withName: "pauseMenu") == nil)
+    }
+    #endif
+
     @Test("Game scene creates the playable world with real nodes")
     func gameSceneCreatesPlayableWorldWithRealNodes() {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         
         scene.didMove(to: view)
+        scene.startGame()
         
         #expect(scene.playerNode != nil)
         #expect(scene.playerNode.parent === scene.worldNode)
@@ -129,6 +264,7 @@ struct GameSceneIntegrationTests {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
+        scene.startGame()
         
         scene.playerNode.takeDamage(amount: 40)
         scene.killCount = 3
@@ -177,6 +313,7 @@ struct GameSceneIntegrationTests {
         )
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
+        scene.startGame()
 
         clock.now = 1
         scene.update(1)
@@ -360,11 +497,33 @@ struct GameSceneIntegrationTests {
         #expect(world.children.count == 15)
         #expect(world.children.allSatisfy { $0.hasActions() })
     }
-    private func makeScene() -> GameScene {
+    private func makeScene(started: Bool = true) -> GameScene {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
+        if started {
+            scene.startGame()
+        }
         return scene
     }
+
+    #if os(macOS)
+    private func keyEvent(keyCode: UInt16) throws -> NSEvent {
+        try #require(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: keyCode
+            )
+        )
+    }
+    #endif
 
 }

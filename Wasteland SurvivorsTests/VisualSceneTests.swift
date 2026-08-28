@@ -10,6 +10,7 @@ private struct VisualRegressionBaselineManifest: Decodable {
     let structuralFingerprint: String
 }
 
+@MainActor
 @Suite(.serialized)
 struct VisualSceneTests {
     @Test("Every powerup has a distinct visual identity")
@@ -40,8 +41,10 @@ struct VisualSceneTests {
         // When both scenes are initialized.
         firstScene.didMove(to: view)
         secondScene.didMove(to: view)
+        firstScene.startGame()
+        secondScene.startGame()
 
-        // Then their visual world geometry is identical.
+        // Then their gameplay world geometry is identical.
         let firstSnapshot = VisualSceneSnapshot.capture(from: firstScene)
         let secondSnapshot = VisualSceneSnapshot.capture(from: secondScene)
 
@@ -273,6 +276,7 @@ struct VisualSceneTests {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
+        scene.startGame()
         return scene
     }
 
