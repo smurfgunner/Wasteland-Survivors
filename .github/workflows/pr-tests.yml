@@ -1,0 +1,33 @@
+name: PR Tests
+
+on:
+  pull_request:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test macOS
+    runs-on: xcode-27
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run tests
+        run: |
+          xcodebuild \
+            -project "Wasteland Survivors.xcodeproj" \
+            -scheme "Wasteland Survivors macOS" \
+            -testPlan "Wasteland Survivors macOS" \
+            -destination "platform=macOS" \
+            test \
+            CODE_SIGNING_ALLOWED=NO
