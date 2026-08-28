@@ -16,9 +16,8 @@ concurrency:
 
 jobs:
   build-macos-dmg:
-    # The workflow commits the release version back to main. The skip-ci
-    # marker on that commit prevents the version sync from starting another release.
-    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    # Version-sync PR merges must not start a second release.
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: sync project version to ') }}
     runs-on: xcode-27
     env:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -136,7 +135,7 @@ jobs:
             --title "Wasteland Survivors $RELEASE_VERSION" \
             --generate-notes
 
-      - name: Commit project version to main
+      - name: Create project version sync PR
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -149,5 +148,15 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: sync project version to $RELEASE_VERSION [skip ci]"
-          git push origin HEAD:main
+          BRANCH_NAME="sync-version-$RELEASE_VERSION-$GITHUB_RUN_ID"
+          git switch -c "$BRANCH_NAME"
+          git commit -m "chore: sync project version to $RELEASE_VERSION"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH_NAME" \
+            --title "chore: sync project version to $RELEASE_VERSION" \
+            --body "Automated version sync for release v$RELEASE_VERSION." \
+            --auto-merge \
+            --merge-method squash
