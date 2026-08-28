@@ -1,6 +1,12 @@
 import SpriteKit
 
 final class GameEffectsRenderer {
+    private let randomSource: RandomSource
+
+    init(randomSource: RandomSource = SystemRandomSource()) {
+        self.randomSource = randomSource
+    }
+
     func renderZombieHit(at position: CGPoint, in world: SKNode) {
         let hitEffect = SKShapeNode(circleOfRadius: 8)
         hitEffect.fillColor = .systemRed
@@ -51,15 +57,15 @@ final class GameEffectsRenderer {
         in world: SKNode
     ) {
         for _ in 0..<12 {
-            let spark = SKShapeNode(circleOfRadius: CGFloat.random(in: 2...5))
+            let spark = SKShapeNode(circleOfRadius: randomSource.nextCGFloat(in: 2...5))
             spark.fillColor = weapon.color
             spark.strokeColor = .white
             spark.position = position
             spark.zPosition = 15
             world.addChild(spark)
 
-            let angle = CGFloat.random(in: 0...(2 * CGFloat.pi))
-            let distance = CGFloat.random(in: 20...60)
+            let angle = randomSource.nextCGFloat(in: 0...(2 * CGFloat.pi))
+            let distance = randomSource.nextCGFloat(in: 20...60)
             let destination = CGPoint(
                 x: position.x + cos(angle) * distance,
                 y: position.y + sin(angle) * distance

@@ -22,8 +22,9 @@ final class GameScene: SKScene {
     let combatSystem = CombatSystem()
     private let movePlayerUseCase = MovePlayerUseCase()
     private let updateEnemyBehaviorUseCase = UpdateEnemyBehaviorUseCase()
-    private let selectWeaponRewardUseCase = SelectWeaponRewardUseCase()
-    private let effectsRenderer = GameEffectsRenderer()
+    private let randomSource: RandomSource
+    private let selectWeaponRewardUseCase: SelectWeaponRewardUseCase
+    private let effectsRenderer: GameEffectsRenderer
     
     private(set) var playerNode: PlayerNode!
     private(set) var zombies: [ZombieNode] = []
@@ -48,10 +49,25 @@ final class GameScene: SKScene {
     private let maxZombies: Int = 18
     private let maxChests: Int = 8
     
+    init(size: CGSize, randomSource: RandomSource = SystemRandomSource()) {
+        self.randomSource = randomSource
+        selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
+        effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
+        super.init(size: size)
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        let randomSource = SystemRandomSource()
+        self.randomSource = randomSource
+        selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
+        effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
+        super.init(coder: aDecoder)
+    }
+
     // Factory method
-    static func newGameScene(size: CGSize) -> GameScene {
+    static func newGameScene(size: CGSize, randomSource: RandomSource = SystemRandomSource()) -> GameScene {
         let sceneSize = size.width > 0 && size.height > 0 ? size : CGSize(width: 1024, height: 768)
-        let scene = GameScene(size: sceneSize)
+        let scene = GameScene(size: sceneSize, randomSource: randomSource)
         scene.scaleMode = .resizeFill
         return scene
     }
@@ -102,17 +118,17 @@ final class GameScene: SKScene {
                 let hash = abs((ix * 73856093) ^ (iy * 19349663))
                 let seed = hash % 100
                 if seed < 15 {
-                    let rock = SKShapeNode(circleOfRadius: CGFloat.random(in: 4...12))
+                    let rock = SKShapeNode(circleOfRadius: randomSource.nextCGFloat(in: 4...12))
                     rock.fillColor = SKColor(red: 0.22, green: 0.19, blue: 0.16, alpha: 1.0)
                     rock.strokeColor = .clear
-                    rock.position = CGPoint(x: x + CGFloat.random(in: -40...40), y: y + CGFloat.random(in: -40...40))
+                    rock.position = CGPoint(x: x + randomSource.nextCGFloat(in: -40...40), y: y + randomSource.nextCGFloat(in: -40...40))
                     rock.zPosition = 1
                     worldNode.addChild(rock)
                 } else if seed < 22 {
-                    let crack = SKShapeNode(rectOf: CGSize(width: CGFloat.random(in: 20...50), height: CGFloat.random(in: 3...6)), cornerRadius: 2)
+                    let crack = SKShapeNode(rectOf: CGSize(width: randomSource.nextCGFloat(in: 20...50), height: randomSource.nextCGFloat(in: 3...6)), cornerRadius: 2)
                     crack.fillColor = SKColor(red: 0.08, green: 0.07, blue: 0.06, alpha: 0.7)
                     crack.strokeColor = .clear
-                    crack.zRotation = CGFloat.random(in: 0...CGFloat.pi)
+                    crack.zRotation = randomSource.nextCGFloat(in: 0...CGFloat.pi)
                     crack.position = CGPoint(x: x, y: y)
                     crack.zPosition = 1
                     worldNode.addChild(crack)
@@ -123,13 +139,13 @@ final class GameScene: SKScene {
     
     private func spawnInitialChests() {
         for _ in 0..<maxChests {
-            spawnChest(near: .zero, radius: CGFloat.random(in: 250...900))
+            spawnChest(near: .zero, radius: randomSource.nextCGFloat(in: 250...900))
         }
     }
     
     // MARK: - Spawning System
     private func spawnChest(near origin: CGPoint, radius: CGFloat) {
-        let angle = CGFloat.random(in: 0...(CGFloat.pi * 2))
+        let angle = randomSource.nextCGFloat(in: 0...(CGFloat.pi * 2))
         let distance = radius
         let pos = CGPoint(x: origin.x + cos(angle) * distance, y: origin.y + sin(angle) * distance)
         
@@ -143,14 +159,14 @@ final class GameScene: SKScene {
     private func spawnZombieOffscreen() {
         guard zombies.count < maxZombies, !isGameOver else { return }
         
-        let angle = CGFloat.random(in: 0...(CGFloat.pi * 2))
-        let spawnDist: CGFloat = Swift.max(size.width, size.height) * 0.7 + CGFloat.random(in: 50...150)
+        let angle = randomSource.nextCGFloat(in: 0...(CGFloat.pi * 2))
+        let spawnDist: CGFloat = Swift.max(size.width, size.height) * 0.7 + randomSource.nextCGFloat(in: 50...150)
         let pos = CGPoint(
             x: playerNode.position.x + cos(angle) * spawnDist,
             y: playerNode.position.y + sin(angle) * spawnDist
         )
         
-        let zombie = ZombieNode()
+        let zombie = ZombieNode(randomSource: randomSource)
         zombie.position = pos
         zombie.zPosition = 8
         worldNode.addChild(zombie)

@@ -8,14 +8,17 @@ import SpriteKit
 final class ZombieNode: SKNode {
     private(set) var health: CGFloat = 60
     private(set) var isDead: Bool = false
-    private let moveSpeed: CGFloat = CGFloat.random(in: 60...95)
+    private let moveSpeed: CGFloat
+    private let randomSource: RandomSource
     private var lastAttackTime: TimeInterval = 0
     private let attackCooldown: TimeInterval = 0.6
     
     private let bodySprite = SKShapeNode(circleOfRadius: 15)
     private let healthBar = SKShapeNode(rectOf: CGSize(width: 24, height: 4), cornerRadius: 1)
     
-    override init() {
+    init(randomSource: RandomSource = SystemRandomSource()) {
+        self.randomSource = randomSource
+        moveSpeed = randomSource.nextCGFloat(in: 60...95)
         super.init()
         setupVisuals()
         setupPhysics()

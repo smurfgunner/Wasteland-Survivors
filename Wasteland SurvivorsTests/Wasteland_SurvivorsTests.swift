@@ -1,6 +1,14 @@
+import Foundation
 import SpriteKit
 import Testing
 @testable import Wasteland_Survivors
+
+private final class VisualRegressionBundleMarker: NSObject {}
+
+private struct VisualRegressionBaselineManifest: Decodable {
+    let nodeCount: Int
+    let structuralFingerprint: String
+}
 
 struct WastelandSurvivorsIntegrationTests {
     @Test("Weapon definitions expose stable combat behavior")
@@ -520,6 +528,42 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(world.children.allSatisfy { $0.hasActions() })
     }
     
+    @Test("A seeded visual scenario builds the same world twice")
+    func seededVisualScenarioBuildsTheSameWorldTwice() throws {
+        // Given a fixed viewport and identical replay seeds.
+        let size = CGSize(width: 800, height: 600)
+        let firstScene = GameScene.newGameScene(size: size, randomSource: SeededRandomSource(seed: 42))
+        let secondScene = GameScene.newGameScene(size: size, randomSource: SeededRandomSource(seed: 42))
+        let view = SKView(frame: CGRect(origin: .zero, size: size))
+
+        // When both scenes are initialized.
+        firstScene.didMove(to: view)
+        secondScene.didMove(to: view)
+
+        // Then their visual world geometry is identical.
+        let firstSnapshot = VisualSceneSnapshot.capture(from: firstScene)
+        let secondSnapshot = VisualSceneSnapshot.capture(from: secondScene)
+
+        let baselineURL = try #require(
+            Bundle(for: VisualRegressionBundleMarker.self).url(
+                forResource: "initial-world.manifest",
+                withExtension: "json"
+            )
+        )
+        let baseline = try JSONDecoder().decode(
+            VisualRegressionBaselineManifest.self,
+            from: Data(contentsOf: baselineURL)
+        )
+
+        #expect(firstSnapshot == secondSnapshot)
+        #expect(firstSnapshot.nodes.count == baseline.nodeCount)
+        let actualFingerprint = try firstSnapshot.fingerprint()
+        #expect(
+            String(actualFingerprint) == baseline.structuralFingerprint,
+            "Actual structural fingerprint: \(actualFingerprint)"
+        )
+    }
+
     private func makeScene() -> GameScene {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
