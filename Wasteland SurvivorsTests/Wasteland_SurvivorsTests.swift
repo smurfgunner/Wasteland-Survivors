@@ -131,6 +131,34 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(zombie.canAttack(currentTime: 1.1) == false)
     }
     
+    @Test("Player regeneration waits four seconds after the latest damage")
+    func playerRegenerationWaitsAfterLatestDamage() {
+        let player = PlayerNode()
+        
+        player.takeDamage(amount: 40)
+        #expect(player.currentHealth == 60)
+        #expect(!player.updateHealth(deltaTime: 3.9))
+        #expect(player.currentHealth == 60)
+        #expect(player.updateHealth(deltaTime: 0.1))
+        #expect(player.currentHealth == 61)
+        
+        player.takeDamage(amount: 10)
+        #expect(!player.updateHealth(deltaTime: 3.9))
+        #expect(player.currentHealth == 51)
+        #expect(player.updateHealth(deltaTime: 0.1))
+        #expect(player.currentHealth == 52)
+    }
+    
+    @Test("Player regeneration stops at maximum health")
+    func playerRegenerationStopsAtMaximumHealth() {
+        let player = PlayerNode()
+        
+        player.takeDamage(amount: 1)
+        #expect(player.updateHealth(deltaTime: 5))
+        #expect(player.currentHealth == player.maxHealth)
+        #expect(!player.updateHealth(deltaTime: 1))
+    }
+    
     @Test("Zombie damage updates health and death state")
     func zombieDamageUpdatesHealthAndDeathState() {
         let zombie = ZombieNode()
@@ -424,6 +452,27 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(scene.playerNode.currentHealth <= 0)
         #expect(scene.isGameOver)
         #expect(scene.hudManager.containerNode.hasActions() == false)
+    }
+    
+    @Test("Game loop regenerates player health after a real zombie attack cooldown")
+    func gameLoopRegeneratesPlayerHealthAfterRealZombieAttackCooldown() {
+        let scene = makeScene()
+        scene.update(1)
+        scene.update(3.1)
+        
+        let zombie = scene.zombies[0]
+        zombie.position = .zero
+        scene.update(4)
+        
+        #expect(scene.playerNode.currentHealth == 88)
+        
+        zombie.takeDamage(amount: zombie.health)
+        zombie.removeFromParent()
+        scene.update(7.9)
+        #expect(scene.playerNode.currentHealth == 88)
+        
+        scene.update(8)
+        #expect(scene.playerNode.currentHealth == 89)
     }
     
     @Test("Transient gameplay effects schedule their removal actions")

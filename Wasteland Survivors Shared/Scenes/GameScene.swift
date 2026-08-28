@@ -175,10 +175,15 @@ final class GameScene: SKScene {
         updatePlayerMovement(dt: dt)
         cameraNode.position = playerNode.position
         
-        // 2. Zombies AI
+        // 2. Health regeneration
+        if playerNode.updateHealth(deltaTime: dt) {
+            hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        }
+        
+        // 3. Zombies AI
         updateZombies(dt: dt, currentTime: currentTime)
         
-        // 3. Auto-Combat
+        // 4. Auto-Combat
         combatSystem.updateAutoCombat(
             player: playerNode,
             zombies: zombies,
@@ -189,10 +194,10 @@ final class GameScene: SKScene {
             }
         )
         
-        // 4. Spawners
+        // 5. Spawners
         handleSpawning(currentTime: currentTime)
         
-        // 5. Cleanup
+        // 6. Cleanup
         zombies.removeAll { $0.isDead && $0.parent == nil }
         chests.removeAll { $0.isOpened && $0.parent == nil }
     }
