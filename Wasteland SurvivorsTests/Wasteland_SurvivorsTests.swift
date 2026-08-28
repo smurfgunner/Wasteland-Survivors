@@ -139,16 +139,35 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(player.currentHealth == 60)
         #expect(!player.updateHealth(deltaTime: 3.9))
         #expect(player.currentHealth == 60)
+        #expect(!player.updateHealth(deltaTime: 0.1))
+        #expect(player.currentHealth == 60)
         #expect(player.updateHealth(deltaTime: 0.1))
         #expect(player.currentHealth == 61)
         
         player.takeDamage(amount: 10)
         #expect(!player.updateHealth(deltaTime: 3.9))
         #expect(player.currentHealth == 51)
+        #expect(!player.updateHealth(deltaTime: 0.1))
+        #expect(player.currentHealth == 51)
         #expect(player.updateHealth(deltaTime: 0.1))
         #expect(player.currentHealth == 52)
     }
     
+    @Test("Player regeneration uses only time after the delay")
+    func playerRegenerationUsesOnlyTimeAfterDelay() {
+        let player = PlayerNode()
+
+        // Given the player has lost 40 health and regeneration is delayed by four seconds.
+        player.takeDamage(amount: 40)
+
+        // When one update crosses the delay by only half a second.
+        let didRegenerate = player.updateHealth(deltaTime: 4.5)
+
+        // Then only half a second of regeneration is applied.
+        #expect(didRegenerate)
+        #expect(player.currentHealth == 65)
+    }
+
     @Test("Player regeneration stops at maximum health")
     func playerRegenerationStopsAtMaximumHealth() {
         let player = PlayerNode()
@@ -472,6 +491,9 @@ struct WastelandSurvivorsIntegrationTests {
         #expect(scene.playerNode.currentHealth == 88)
         
         scene.update(8)
+        #expect(scene.playerNode.currentHealth == 88)
+
+        scene.update(8.1)
         #expect(scene.playerNode.currentHealth == 89)
     }
     
