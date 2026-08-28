@@ -23,6 +23,7 @@ final class GameScene: SKScene {
     private let movePlayerUseCase = MovePlayerUseCase()
     private let updateEnemyBehaviorUseCase = UpdateEnemyBehaviorUseCase()
     private let randomSource: RandomSource
+    private let clock: (TimeInterval) -> TimeInterval
     private let selectWeaponRewardUseCase: SelectWeaponRewardUseCase
     private let effectsRenderer: GameEffectsRenderer
     
@@ -43,14 +44,21 @@ final class GameScene: SKScene {
     // Timers & Balancing
     private var lastUpdateTime: TimeInterval = 0
     private var lastZombieSpawnTime: TimeInterval = 0
-    private var zombieSpawnInterval: TimeInterval = 2.0
+    private let initialZombieSpawnInterval: TimeInterval = 2.0 / 3.0
+    private let minimumZombieSpawnInterval: TimeInterval = 0.8 / 3.0
+    private var zombieSpawnInterval: TimeInterval = 2.0 / 3.0
     private var lastChestSpawnTime: TimeInterval = 0
     private var chestSpawnInterval: TimeInterval = 8.0
     private let maxZombies: Int = 18
     private let maxChests: Int = 8
     
-    init(size: CGSize, randomSource: RandomSource = SystemRandomSource()) {
+    init(
+        size: CGSize,
+        randomSource: RandomSource = SystemRandomSource(),
+        clock: @escaping (TimeInterval) -> TimeInterval = { $0 }
+    ) {
         self.randomSource = randomSource
+        self.clock = clock
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
         super.init(size: size)
@@ -59,15 +67,20 @@ final class GameScene: SKScene {
     required init?(coder aDecoder: NSCoder) {
         let randomSource = SystemRandomSource()
         self.randomSource = randomSource
+        self.clock = { $0 }
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
         super.init(coder: aDecoder)
     }
 
     // Factory method
-    static func newGameScene(size: CGSize, randomSource: RandomSource = SystemRandomSource()) -> GameScene {
+    static func newGameScene(
+        size: CGSize,
+        randomSource: RandomSource = SystemRandomSource(),
+        clock: @escaping (TimeInterval) -> TimeInterval = { $0 }
+    ) -> GameScene {
         let sceneSize = size.width > 0 && size.height > 0 ? size : CGSize(width: 1024, height: 768)
-        let scene = GameScene(size: sceneSize, randomSource: randomSource)
+        let scene = GameScene(size: sceneSize, randomSource: randomSource, clock: clock)
         scene.scaleMode = .resizeFill
         return scene
     }
@@ -175,15 +188,16 @@ final class GameScene: SKScene {
     
     // MARK: - Game Loop
     override func update(_ currentTime: TimeInterval) {
+        let gameTime = clock(currentTime)
         if lastUpdateTime == 0 {
-            lastUpdateTime = currentTime
-            lastZombieSpawnTime = currentTime
-            lastChestSpawnTime = currentTime
+            lastUpdateTime = gameTime
+            lastZombieSpawnTime = gameTime
+            lastChestSpawnTime = gameTime
             return
         }
         
-        let dt = currentTime - lastUpdateTime
-        lastUpdateTime = currentTime
+        let dt = gameTime - lastUpdateTime
+        lastUpdateTime = gameTime
         
         guard !isGameOver else { return }
         
@@ -204,14 +218,14 @@ final class GameScene: SKScene {
             player: playerNode,
             zombies: zombies,
             world: worldNode,
-            currentTime: currentTime,
+            currentTime: gameTime,
             onDamageZombie: { [weak self] zombie, damage in
                 self?.damageZombie(zombie, amount: damage)
             }
         )
         
         // 5. Spawners
-        handleSpawning(currentTime: currentTime)
+        handleSpawning(currentTime: gameTime)
         
         // 6. Cleanup
         zombies.removeAll { $0.isDead && $0.parent == nil }
@@ -254,7 +268,7 @@ final class GameScene: SKScene {
         if currentTime - lastZombieSpawnTime > zombieSpawnInterval {
             lastZombieSpawnTime = currentTime
             spawnZombieOffscreen()
-            zombieSpawnInterval = Swift.max(0.8, zombieSpawnInterval - 0.01)
+            zombieSpawnInterval = Swift.max(minimumZombieSpawnInterval, zombieSpawnInterval - 0.01)
         }
         
         if currentTime - lastChestSpawnTime > chestSpawnInterval {
@@ -331,7 +345,7 @@ final class GameScene: SKScene {
         hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
         hudManager.updateWeapon(weapon: playerNode.currentWeapon)
         
-        zombieSpawnInterval = 2.0
+        zombieSpawnInterval = initialZombieSpawnInterval
         isGameOver = false
         
         spawnInitialChests()

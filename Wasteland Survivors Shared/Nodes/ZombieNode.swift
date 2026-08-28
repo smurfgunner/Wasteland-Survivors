@@ -6,6 +6,9 @@
 import SpriteKit
 
 final class ZombieNode: SKNode {
+    static let hitFlashDuration: TimeInterval = 0.06
+    static let deathAnimationDuration: TimeInterval = 0.25
+
     private(set) var health: CGFloat = 60
     private(set) var isDead: Bool = false
     private let moveSpeed: CGFloat
@@ -95,11 +98,11 @@ final class ZombieNode: SKNode {
         
         bodySprite.fillColor = .white
         bodySprite.run(.sequence([
-            .wait(forDuration: 0.06),
+            .wait(forDuration: Self.hitFlashDuration),
             .run { [weak self] in
                 self?.bodySprite.fillColor = SKColor(red: 0.28, green: 0.55, blue: 0.22, alpha: 1.0)
             }
-        ]))
+        ]), withKey: "damageFlash")
         
         if health <= 0 {
             die()
@@ -113,10 +116,10 @@ final class ZombieNode: SKNode {
         
         run(.sequence([
             .group([
-                .scale(to: 0.2, duration: 0.25),
-                .fadeOut(withDuration: 0.25)
+                .scale(to: 0.2, duration: Self.deathAnimationDuration),
+                .fadeOut(withDuration: Self.deathAnimationDuration)
             ]),
             .removeFromParent()
-        ]))
+        ]), withKey: "deathAnimation")
     }
 }

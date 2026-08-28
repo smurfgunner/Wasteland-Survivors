@@ -6,6 +6,8 @@
 import SpriteKit
 
 final class PlayerNode: SKNode {
+    static let hitFlashDuration: TimeInterval = 0.1
+
     let maxHealth: CGFloat = 100
     private(set) var currentHealth: CGFloat = 100
     private(set) var currentWeapon: WeaponType = .pistol
@@ -91,11 +93,11 @@ final class PlayerNode: SKNode {
         
         bodySprite.fillColor = .systemRed
         bodySprite.run(.sequence([
-            .wait(forDuration: 0.1),
+            .wait(forDuration: Self.hitFlashDuration),
             .run { [weak self] in
                 self?.bodySprite.fillColor = SKColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1.0)
             }
-        ]))
+        ]), withKey: "damageFlash")
     }
     
     @discardableResult
