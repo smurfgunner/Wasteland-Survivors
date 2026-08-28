@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Commit project version bump to develop
+      - name: Create project version bump PR targeting develop
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -49,7 +49,29 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add "$PROJECT_FILE"
             git commit -m "chore: bump project version to $RELEASE_VERSION"
-            git push origin develop
+
+            BRANCH_NAME="release/v$RELEASE_VERSION"
+            git switch -c "$BRANCH_NAME"
+            git push --force origin "$BRANCH_NAME"
+
+            EXISTING_VERSION_PR=$(gh pr list \
+              --repo "$GH_REPO" \
+              --base develop \
+              --head "$BRANCH_NAME" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty')
+
+            if [ -n "$EXISTING_VERSION_PR" ]; then
+              echo "Version bump PR #$EXISTING_VERSION_PR already exists."
+            else
+              gh pr create \
+                --repo "$GH_REPO" \
+                --base develop \
+                --head "$BRANCH_NAME" \
+                --title "chore: bump project version to $RELEASE_VERSION" \
+                --body "Automated version bump for release $RELEASE_VERSION. Marketing version: $RELEASE_VERSION. Build number: $NEXT_BUILD."
+            fi
           fi
 
       - name: Build changelog and create or update PR
