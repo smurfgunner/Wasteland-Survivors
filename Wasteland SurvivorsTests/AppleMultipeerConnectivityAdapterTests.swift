@@ -6,7 +6,7 @@ import Testing
 @Suite("Apple Multipeer Connectivity Adapter")
 struct AppleMultipeerConnectivityAdapterTests {
     @Test("Session forwards injectable adapter lifecycle and callbacks")
-    func sessionForwardsAdapterLifecycleAndCallbacks() throws {
+    func sessionForwardsAdapterLifecycleAndCallbacks() async throws {
         let adapter = FakeAppleAdapter()
         let session = MultipeerConnectivitySession(adapter: adapter)
         let delegate = TransportDelegateSpy()
@@ -29,12 +29,20 @@ struct AppleMultipeerConnectivityAdapterTests {
         #expect(delegate.states.last == .failed)
 
         adapter.emitPeer("remote", state: .connected)
-        adapter.emit(Data("hello".utf8), from: "remote")
+        let message = MultiplayerWireMessage.hello(MultiplayerHello(
+            sessionID: "session",
+            peerID: "remote",
+            startedAt: 20,
+            protocolVersion: 1
+        ))
+        let encodedMessage = try message.encoded()
+        adapter.emit(encodedMessage, from: "remote")
+        await MainActor.run {}
         #expect(delegate.peerChanges.count == 1)
         #expect(delegate.peerChanges.first?.0 == "remote")
         #expect(delegate.peerChanges.first?.1 == .connected)
         #expect(delegate.received.count == 1)
-        #expect(delegate.received.first?.0 == Data("hello".utf8))
+        #expect(try MultiplayerWireMessage.decode(delegate.received.first?.0 ?? Data()) == message)
         #expect(delegate.received.first?.1 == "remote")
 
 

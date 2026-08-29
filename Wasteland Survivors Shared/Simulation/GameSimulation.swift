@@ -382,8 +382,13 @@ struct GameSimulation {
         let crossedZombieSpawnInterval = tick > state.tick &&
             tick / configuration.zombieSpawnIntervalTicks >
             state.tick / configuration.zombieSpawnIntervalTicks
+        let livingZombieCount = next.zombies.reduce(into: 0) { count, zombie in
+            if zombie.health > 0 {
+                count += 1
+            }
+        }
         if crossedZombieSpawnInterval,
-           next.zombies.count < configuration.maxZombies,
+           livingZombieCount < configuration.maxZombies,
            let spawnedZombie = NPCSpawnSystem.zombie(
                seed: next.seed,
                tick: tick,

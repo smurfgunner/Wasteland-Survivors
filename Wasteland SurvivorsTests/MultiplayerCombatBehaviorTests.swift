@@ -129,6 +129,29 @@ struct MultiplayerCombatBehaviorTests {
         }.count == 2)
     }
 
+    @Test("Zombie spawning counts living zombies instead of retained dead states")
+    func zombieSpawningCountsLivingZombiesInsteadOfRetainedDeadStates() {
+        // Given a full zombie list containing only dead zombies at the spawn boundary.
+        var state = makeState(
+            players: [makePlayer(id: "player", position: .zero)],
+            zombies: (0..<18).map { index in
+                makeZombie(id: "dead-\(index)", position: .zero, health: 0)
+            }
+        )
+        state.tick = 39
+
+        // When the next authoritative tick is advanced.
+        let step = GameSimulation().advance(
+            state,
+            inputs: [input(for: "player", sequence: 1)],
+            tick: 40
+        )
+
+        // Then a new zombie is spawned because no retained dead zombie consumes capacity.
+        #expect(step.state.zombies.count == 19)
+        #expect(step.state.zombies.contains { $0.health > 0 })
+    }
+
     @Test("A dead zombie cannot follow or damage a player during client prediction")
     func deadZombieCannotFollowOrDamageAPlayerDuringClientPrediction() {
         // Given a replicated zombie already marked dead and overlapping a living player.
