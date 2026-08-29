@@ -10,20 +10,13 @@ struct AppleMultipeerConnectivityAdapterTests {
         let adapter = FakeAppleAdapter()
         let session = MultipeerConnectivitySession(adapter: adapter)
         let delegate = TransportDelegateSpy()
-        var diagnostics: [String] = []
         session.delegate = delegate
-        session.diagnosticHandler = { diagnostics.append($0) }
 
         session.connect()
         #expect(adapter.connectCallCount == 1)
         #expect(delegate.states == [.connecting, .connected])
-        #expect(diagnostics.contains("connecting localPeerID=local"))
-        #expect(diagnostics.contains("state=connected"))
-
         try session.send(Data("direct".utf8), to: "remote", delivery: .reliable)
         try session.broadcast(Data("broadcast".utf8), delivery: .replaceable)
-        #expect(diagnostics.contains("sending bytes=6 to=remote delivery=reliable"))
-        #expect(diagnostics.contains("broadcasting bytes=9 delivery=replaceable"))
         #expect(adapter.sent.count == 2)
         #expect(adapter.sent[0].0 == Data("direct".utf8))
         #expect(adapter.sent[0].1 == "remote")

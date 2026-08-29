@@ -664,7 +664,12 @@ struct LocalMultiplayerTests {
         )
         session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded(), from: "host")
 
-        #expect(scene.playerNode.position == .zero)
+        let distanceFromAuthoritative = hypot(
+            scene.playerNode.position.x,
+            scene.playerNode.position.y
+        )
+        #expect(distanceFromAuthoritative <= 1)
+
     }
 
     @Test("Client preserves projectile node identity across snapshot updates")
@@ -687,6 +692,140 @@ struct LocalMultiplayerTests {
 
         #expect(scene.worldNode.children.compactMap { $0 as? ProjectileNode }.first === projectile)
         #expect(projectile.position == CGPoint(x: 30, y: 40))
+    }
+
+    @Test("Client does not teleport when a delayed snapshot acknowledges predicted input")
+    @MainActor
+    func clientDoesNotTeleportWhenDelayedSnapshotAcknowledgesPredictedInput() throws {
+        // Given a client that has predicted continuous movement locally.
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        scene.update(0)
+        for frame in 1...12 {
+            scene.update(Double(frame) / 60.0)
+        }
+        let predictedPosition = scene.playerNode.position
+
+        // When an older authoritative position acknowledges the pending inputs.
+        let delayedBoard = MultiplayerBoardState(
+            sequence: 2,
+            simulationTick: 12,
+            hostID: "host",
+            players: [
+                MultiplayerPlayerState(id: "host", position: .zero, color: .blue),
+                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
+            ],
+            zombies: [],
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            killCount: 0,
+            acknowledgedInputSequences: ["client": 100]
+        )
+        session.deliver(
+            try MultiplayerWireMessage.boardSnapshot(delayedBoard).encoded(),
+            from: "host"
+        )
+        let correctedPosition = scene.playerNode.position
+
+        // Then reconciliation is bounded instead of visibly teleporting the player.
+        let correctionDistance = hypot(
+            correctedPosition.x - predictedPosition.x,
+            correctedPosition.y - predictedPosition.y
+        )
+        #expect(predictedPosition.x > 0)
+        #expect(correctionDistance <= 9)
+    }
+
+    @Test("Client interpolates remote movement without a large frame jump")
+    @MainActor
+    func clientInterpolatesRemoteMovementWithoutLargeFrameJump() throws {
+        // Given a client with two authoritative host positions separated by several ticks.
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        let initialBoard = MultiplayerBoardState(
+            sequence: 1,
+            simulationTick: 0,
+            hostID: "host",
+            players: [
+                MultiplayerPlayerState(id: "host", position: .zero, color: .blue),
+                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
+            ],
+            zombies: [],
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            killCount: 0
+        )
+        session.deliver(
+            try MultiplayerWireMessage.boardSnapshot(initialBoard).encoded(),
+            from: "host"
+        )
+
+        // When the host advances a remote player over twelve simulation ticks.
+        let movedBoard = MultiplayerBoardState(
+            sequence: 2,
+            simulationTick: 12,
+            hostID: "host",
+            players: [
+                MultiplayerPlayerState(id: "host", position: CGPoint(x: 120, y: 0), color: .blue),
+                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
+            ],
+            zombies: [],
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            killCount: 0
+        )
+        session.deliver(
+            try MultiplayerWireMessage.boardSnapshot(movedBoard).encoded(),
+            from: "host"
+        )
+        let remotePlayer = try #require(scene.remotePlayers["host"])
+        var previousPosition = remotePlayer.position
+
+        // Then each rendered frame advances smoothly and eventually follows the host.
+        for frame in 1...12 {
+            scene.update(Double(frame) / 60.0)
+            let currentPosition = remotePlayer.position
+            let frameDistance = hypot(
+                currentPosition.x - previousPosition.x,
+                currentPosition.y - previousPosition.y
+            )
+            #expect(frameDistance <= 20)
+            previousPosition = currentPosition
+        }
+        #expect(remotePlayer.position.x > 0)
     }
 
     @Test("Rotation interpolation follows the shortest angular path")

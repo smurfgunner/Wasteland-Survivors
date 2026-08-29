@@ -17,6 +17,36 @@ struct MultiplayerDeliveryPolicyTests {
         #expect(MultiplayerWireMessage.boardSnapshot(.empty(hostID: "h", sequence: 1)).deliveryPolicy == .replaceable)
     }
 
+    @Test("Snapshot sampling uses the sequence-ordered history")
+    func snapshotSamplingUsesSequenceOrderedHistory() {
+        var buffer = MultiplayerSnapshotBuffer()
+        for sequence in 1...3 {
+            let appended = buffer.append(MultiplayerBoardState(
+                sequence: UInt64(sequence),
+                simulationTick: UInt64(sequence),
+                hostID: "host",
+                players: [MultiplayerPlayerState(
+                    id: "player",
+                    position: CGPoint(x: sequence, y: 0),
+                    color: .blue
+                )],
+                zombies: [],
+                chests: [],
+                powerUps: [],
+                projectiles: [],
+                killCount: 0
+            ))
+            #expect(appended)
+        }
+
+        #expect(buffer.position(
+            for: "player",
+            renderTick: 3,
+            delayTicks: 0,
+            maxExtrapolationTicks: 0
+        ) == CGPoint(x: 3, y: 0))
+    }
+
     @Test("Session lifecycle messages are reliable")
     func lifecycleMessagesAreReliable() {
         let hello = MultiplayerHello(sessionID: "session", peerID: "peer", startedAt: 1, protocolVersion: 1)

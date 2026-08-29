@@ -340,6 +340,46 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(received == [input])
     }
 
+    @Test("Host retains the latest client input between network packets")
+    @MainActor
+    func hostRetainsLatestClientInputBetweenNetworkPackets() throws {
+        // Given a host that has accepted a client and received one movement input.
+        let session = CoordinatorTestSession(localPlayerID: "host")
+        session.connectedPeerIDs = ["client"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 1
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match", peerID: "client", startedAt: 20, protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match", peerID: "client", protocolVersion: 1
+        )).encoded(), from: "client")
+        let input = MultiplayerPlayerInput(
+            playerID: "client",
+            sequence: 1,
+            movement: CGVector(dx: 1, dy: 0),
+            aimAngle: 0,
+            wantsToAttack: false
+        )
+        session.deliver(
+            try MultiplayerWireMessage.playerInput(input).encoded(),
+            from: "client"
+        )
+
+        // When the host advances more than one simulation step without another packet.
+        let firstStep = coordinator.consumeQueuedInputs()
+        let secondStep = coordinator.consumeQueuedInputs()
+
+        // Then the latest intent remains active for every authoritative step.
+        #expect(firstStep == [input])
+        #expect(secondStep == [input])
+        #expect(coordinator.acknowledgedInputSequences["client"] == 1)
+    }
+
     @Test("Input sequence ordering accepts a single wraparound")
     @MainActor
     func inputSequenceOrderingAcceptsWraparound() throws {

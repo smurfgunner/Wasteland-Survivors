@@ -329,17 +329,13 @@ struct MultiplayerSnapshotBuffer {
     }
 
     func surrounding(tick: UInt64) -> (before: MultiplayerBoardState, after: MultiplayerBoardState)? {
-        let snapshotsByTick = snapshots.sorted {
-            if $0.simulationTick == $1.simulationTick {
-                return $0.sequence < $1.sequence
-            }
-            return $0.simulationTick < $1.simulationTick
-        }
-        guard let afterIndex = snapshotsByTick.firstIndex(where: { $0.simulationTick >= tick }),
+        // Snapshots are kept in sequence order by append(), and simulation ticks
+        // advance with that sequence. Avoid sorting the history for every sample.
+        guard let afterIndex = snapshots.firstIndex(where: { $0.simulationTick >= tick }),
               afterIndex > 0 else {
             return nil
         }
-        return (snapshotsByTick[afterIndex - 1], snapshotsByTick[afterIndex])
+        return (snapshots[afterIndex - 1], snapshots[afterIndex])
     }
 
     func position(
@@ -350,10 +346,10 @@ struct MultiplayerSnapshotBuffer {
     ) -> CGPoint? {
         guard !snapshots.isEmpty else { return nil }
         let targetTick = renderTick > delayTicks ? renderTick - delayTicks : 0
-        let ordered = snapshots.sorted {
-            if $0.simulationTick == $1.simulationTick { return $0.sequence < $1.sequence }
-            return $0.simulationTick < $1.simulationTick
-        }
+        // append() maintains sequence order, which is also simulation-tick
+        // order. This method is called for every rendered entity, so sorting here
+        // would turn a small interpolation step into repeated per-frame work.
+        let ordered = snapshots
         func point(in snapshot: MultiplayerBoardState) -> CGPoint? {
             if let player = snapshot.players.first(where: { $0.id == entityID }) { return player.position }
             if let zombie = snapshot.zombies.first(where: { $0.id == entityID }) { return CGPoint(x: zombie.x, y: zombie.y) }
@@ -517,13 +513,6 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     private var isDisconnecting = false
-    var diagnosticHandler: ((String) -> Void)?
-
-    private func diagnostic(_ message: String) {
-        print("[Multiplayer] \(message)")
-        diagnosticHandler?(message)
-    }
-
     init(playerName: String = "Wasteland Player") {
         localPeerID = UUID().uuidString
         sessionStartedAt = Date().timeIntervalSince1970
@@ -542,21 +531,17 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
     }
 
     func connect() {
-        diagnostic("connecting localPeerID=\(localPeerID)")
         if let appleAdapter {
-            diagnostic("using injected Apple Multipeer Connectivity adapter")
             appleAdapter.delegate = self
             appleAdapter.connect()
             return
         }
         isDisconnecting = false
         state = .connecting
-        diagnostic("transport state=connecting")
         delegate?.transport(self, didChange: state)
         let session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
         session.delegate = self
         self.session = session
-        diagnostic("MCSession created encryption=required")
 
         let advertiser = MCNearbyServiceAdvertiser(
             peer: peerID,
@@ -566,23 +551,19 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
         advertiser.delegate = self
         advertiser.startAdvertisingPeer()
         self.advertiser = advertiser
-        diagnostic("advertising started serviceType=\(serviceType)")
 
         let browser = MCNearbyServiceBrowser(peer: peerID, serviceType: serviceType)
         browser.delegate = self
         browser.startBrowsingForPeers()
         self.browser = browser
-        diagnostic("browsing started serviceType=\(serviceType)")
     }
 
     func disconnect() {
-        diagnostic("disconnecting localPeerID=\(localPeerID)")
         if let appleAdapter {
             appleAdapter.disconnect()
             return
         }
         isDisconnecting = true
-        diagnostic("disconnect requested")
         advertiser?.stopAdvertisingPeer()
         browser?.stopBrowsingForPeers()
         session?.disconnect()
@@ -598,23 +579,19 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
     }
 
     func send(_ data: Data, to peerID: String, delivery: MultiplayerDeliveryPolicy) throws {
-        diagnostic("sending bytes=\(data.count) to=\(peerID) delivery=\(delivery)")
         if let appleAdapter {
             try appleAdapter.send(data, to: peerID, delivery: delivery)
             return
         }
         guard state == .connected else {
-            diagnostic("send skipped reason=notConnected state=\(state) peer=\(peerID)")
             throw MultiplayerTransportError.notConnected
         }
         guard let session,
               let peer = session.connectedPeers.first(where: { $0.displayName == peerID }) else {
-            diagnostic("send skipped reason=peerUnavailable peer=\(peerID) connectedPeers=\(connectedPeerIDs.sorted())")
             throw MultiplayerTransportError.peerUnavailable
         }
         let mode: MCSessionSendDataMode = delivery == .reliable ? .reliable : .unreliable
         try session.send(data, toPeers: [peer], with: mode)
-        diagnostic("send completed to=\(peerID)")
     }
 
     func broadcast(_ data: Data) throws {
@@ -622,22 +599,18 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
     }
 
     func broadcast(_ data: Data, delivery: MultiplayerDeliveryPolicy) throws {
-        diagnostic("broadcasting bytes=\(data.count) delivery=\(delivery)")
         if let appleAdapter {
             try appleAdapter.broadcast(data, delivery: delivery)
             return
         }
         guard state == .connected else {
-            diagnostic("broadcast skipped reason=notConnected state=\(state)")
             throw MultiplayerTransportError.notConnected
         }
         guard let session, !session.connectedPeers.isEmpty else {
-            diagnostic("broadcast skipped reason=peerUnavailable connectedPeers=\(connectedPeerIDs.sorted())")
             throw MultiplayerTransportError.peerUnavailable
         }
         let mode: MCSessionSendDataMode = delivery == .reliable ? .reliable : .unreliable
         try session.send(data, toPeers: session.connectedPeers, with: mode)
-        diagnostic("broadcast completed peers=\(session.connectedPeers.map(\.displayName).sorted())")
     }
 }
 
@@ -648,12 +621,10 @@ extension MultipeerConnectivitySession: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
-        diagnostic("invitation received from peer=\(peerID.displayName) hasSession=\(session != nil)")
         invitationHandler(true, session)
     }
 
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
-        diagnostic("advertising failed error=\(error.localizedDescription)")
     }
 }
 
@@ -663,15 +634,12 @@ extension MultipeerConnectivitySession: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
-        diagnostic("peer discovered peer=\(peerID.displayName) info=\(info ?? [:]) hasSession=\(session != nil)")
         guard peerID != self.peerID, let session else { return }
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
-        diagnostic("invitation sent to peer=\(peerID.displayName)")
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
-        diagnostic("browsing failed error=\(error.localizedDescription)")
     }
 }
 
@@ -679,19 +647,16 @@ extension MultipeerConnectivitySession: AppleMultipeerConnectivityAdapterDelegat
     func appleAdapter(_ adapter: AppleMultipeerConnectivityAdapter, didChange state: MultiplayerTransportState) {
         guard adapter === appleAdapter else { return }
         self.state = state
-        diagnostic("state=\(state)")
         delegate?.transport(self, didChange: state)
     }
 
     func appleAdapter(_ adapter: AppleMultipeerConnectivityAdapter, didChangePeer peerID: String, state: MultiplayerPeerState) {
         guard adapter === appleAdapter else { return }
-        diagnostic("peer=\(peerID) state=\(state)")
         delegate?.transport(self, didChangePeer: peerID, state: state)
     }
 
     func appleAdapter(_ adapter: AppleMultipeerConnectivityAdapter, didReceive data: Data, from peerID: String) {
         guard adapter === appleAdapter else { return }
-        diagnostic("received bytes=\(data.count) from=\(peerID)")
         delegate?.transport(self, didReceive: data, from: peerID)
     }
 }
@@ -710,18 +675,15 @@ extension MultipeerConnectivitySession: MCSessionDelegate {
         switch state {
         case .connected:
             self.state = .connected
-            diagnostic("peer=\(peerID.displayName) state=connected")
             delegate?.transport(self, didChangePeer: peerID.displayName, state: .connected)
         case .connecting:
             self.state = .connecting
         case .notConnected:
             self.state = session.connectedPeers.isEmpty ? .connecting : .connected
-            diagnostic("peer=\(peerID.displayName) state=disconnected")
             delegate?.transport(self, didChangePeer: peerID.displayName, state: .disconnected)
         @unknown default:
             self.state = .failed
         }
-        diagnostic("state=\(self.state)")
         delegate?.transport(self, didChange: self.state)
     }
 
@@ -734,7 +696,6 @@ extension MultipeerConnectivitySession: MCSessionDelegate {
             return
         }
         guard !isDisconnecting else { return }
-        diagnostic("received bytes=\(data.count) from=\(peerID.displayName)")
         delegate?.transport(self, didReceive: data, from: peerID.displayName)
     }
 

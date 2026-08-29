@@ -35,21 +35,6 @@ enum MultiplayerSessionRole: Equatable, Sendable {
     case disconnected
 }
 
-private extension MultiplayerWireMessage {
-    var logName: String {
-        switch self {
-        case .hello: return "hello"
-        case .hostAnnouncement: return "hostAnnouncement"
-        case .joinRequest: return "joinRequest"
-        case .joinAccepted: return "joinAccepted"
-        case .playerUpdate: return "playerUpdate"
-        case .boardSnapshot: return "boardSnapshot"
-        case .playerInput: return "playerInput"
-        case .gameplayEvent: return "gameplayEvent"
-        }
-    }
-}
-
 @MainActor
 final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     private let transport: MultiplayerTransport
@@ -62,12 +47,9 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     private var latestAcknowledgedInputSequences: [String: UInt64] = [:]
     private var acknowledgedInputSequencesStorage: [String: UInt64] = [:]
     private var queuedInputs: [MultiplayerPlayerInput] = []
+    private var latestInputs: [String: MultiplayerPlayerInput] = [:]
     private var appliedEvents = AppliedEventStore()
     private var hasSentHello = false
-
-    private func diagnostic(_ message: String) {
-        print("[Multiplayer] coordinator \(message)")
-    }
 
     private(set) var role: MultiplayerSessionRole = .idle
     private(set) var hostID: String?
@@ -99,7 +81,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     func start() {
         guard role == .idle || role == .disconnected else { return }
         hasSentHello = false
-        diagnostic("start localPeerID=\(transport.localPeerID) sessionID=\(sessionID)")
         transport.delegate = self
         updateRole(.negotiating)
         transport.connect()
@@ -129,6 +110,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         latestAcknowledgedInputSequences.removeAll()
         acknowledgedInputSequencesStorage.removeAll()
         queuedInputs.removeAll()
+        latestInputs.removeAll()
         appliedEvents = AppliedEventStore()
     }
 
@@ -139,11 +121,14 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
                 isNewer(current.sequence, than: replacement.sequence) ? current : replacement
             }
         )
-        for input in inputsByPlayer.values {
+        latestInputs.merge(inputsByPlayer) { current, replacement in
+            isNewer(current.sequence, than: replacement.sequence) ? current : replacement
+        }
+        for input in latestInputs.values {
             acknowledgedInputSequencesStorage[input.playerID] = input.sequence
         }
         queuedInputs.removeAll()
-        return inputsByPlayer.values.sorted { $0.playerID < $1.playerID }
+        return latestInputs.values.sorted { $0.playerID < $1.playerID }
     }
 
     func broadcastGameplayEvent(_ event: GameplayEvent, sequence: UInt64, tick: UInt64) {
@@ -165,7 +150,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     }
 
     func transport(_ transport: MultiplayerTransport, didChange state: MultiplayerTransportState) {
-        diagnostic("transport state=\(state)")
         if state == .connected {
             sendHello()
         }
@@ -182,11 +166,11 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     }
 
     func transport(_ transport: MultiplayerTransport, didChangePeer peerID: String, state: MultiplayerPeerState) {
-        diagnostic("peer state peer=\(peerID) state=\(state)")
         guard state == .disconnected else { return }
 
         acceptedPeerIDs.remove(peerID)
         latestInputSequences[peerID] = nil
+        latestInputs[peerID] = nil
         acknowledgedInputSequencesStorage[peerID] = nil
         queuedInputs.removeAll { $0.playerID == peerID }
 
@@ -201,17 +185,12 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
 
     func transport(_ transport: MultiplayerTransport, didReceive data: Data, from peerID: String) {
         guard let message = try? MultiplayerWireMessage.decode(data) else {
-            diagnostic("discarded undecodable bytes=\(data.count) from=\(peerID)")
             return
         }
-        diagnostic("received message=\(message.logName) bytes=\(data.count) from=\(peerID)")
         guard senderMatches(message, peerID: peerID) else {
-            diagnostic("discarded sender mismatch message=\(message.logName) from=\(peerID)")
             return
         }
         guard isAuthorized(message, from: peerID) else {
-            let currentHostID = hostID ?? "nil"
-            diagnostic("discarded unauthorized message=\(message.logName) from=\(peerID) role=\(role) hostID=\(currentHostID)")
             return
         }
         if handle(message) {
@@ -282,17 +261,10 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     }
 
     private func handle(_ hello: MultiplayerHello) {
-        diagnostic("hello peer=\(hello.peerID) startedAt=\(hello.startedAt)")
         guard hello.peerID != transport.localPeerID else {
-            diagnostic("hello rejected reason=localPeerID peer=\(hello.peerID)")
             return
         }
         guard hello.protocolVersion == protocolVersion else {
-            diagnostic(
-                "hello rejected reason=incompatible receivedSessionID=\(hello.sessionID) " +
-                "expectedSessionID=\(sessionID) receivedProtocolVersion=\(hello.protocolVersion) " +
-                "expectedProtocolVersion=\(protocolVersion)"
-            )
             return
         }
 
@@ -318,15 +290,9 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
 
     private func handle(_ announcement: MultiplayerHostAnnouncement) {
         guard announcement.protocolVersion == protocolVersion else {
-            diagnostic(
-                "host announcement rejected reason=incompatible receivedSessionID=\(announcement.sessionID) " +
-                "expectedSessionID=\(sessionID) receivedProtocolVersion=\(announcement.protocolVersion) " +
-                "expectedProtocolVersion=\(protocolVersion)"
-            )
             return
         }
         guard announcement.hostID != transport.localPeerID else {
-            diagnostic("host announcement rejected reason=localPeerID host=\(announcement.hostID)")
             return
         }
 
@@ -340,7 +306,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     }
 
     private func handle(_ request: MultiplayerJoinRequest) {
-        diagnostic("join request peer=\(request.peerID)")
         guard role == .host,
               isCompatible(sessionID: request.sessionID, version: request.protocolVersion),
               request.peerID != transport.localPeerID,
@@ -357,14 +322,12 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     }
 
     private func handle(_ accepted: MultiplayerJoinAccepted) {
-        diagnostic("join accepted peer=\(accepted.peerID) host=\(accepted.hostID)")
         guard isCompatible(sessionID: accepted.sessionID, version: accepted.protocolVersion),
               accepted.peerID == transport.localPeerID else { return }
         becomeClient(hostID: accepted.hostID)
     }
 
     private func handle(_ input: MultiplayerPlayerInput) {
-        diagnostic("player input peer=\(input.playerID) sequence=\(input.sequence)")
         guard role == .host,
               input.playerID != transport.localPeerID,
               acceptedPeerIDs.contains(input.playerID),
@@ -372,6 +335,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
               isValid(input),
               latestInputSequences[input.playerID].map({ isNewer(input.sequence, than: $0) }) ?? true else { return }
         latestInputSequences[input.playerID] = input.sequence
+        latestInputs[input.playerID] = input
         queuedInputs.append(input)
         onInput?(input)
     }

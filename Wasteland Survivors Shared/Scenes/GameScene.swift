@@ -13,21 +13,6 @@ import UIKit
 import AppKit
 #endif
 
-private extension MultiplayerWireMessage {
-    var logNameForDiagnostics: String {
-        switch self {
-        case .hello: return "hello"
-        case .hostAnnouncement: return "hostAnnouncement"
-        case .joinRequest: return "joinRequest"
-        case .joinAccepted: return "joinAccepted"
-        case .playerUpdate: return "playerUpdate"
-        case .boardSnapshot: return "boardSnapshot"
-        case .playerInput: return "playerInput"
-        case .gameplayEvent: return "gameplayEvent"
-        }
-    }
-}
-
 final class GameScene: SKScene {
     enum MenuState: Equatable {
         case main
@@ -85,6 +70,8 @@ final class GameScene: SKScene {
     private var latestLocalPlayerInput: PlayerInput?
     var authoritativeSimulationTick: UInt64 { authoritativeGameState?.tick ?? 0 }
     private var acceptedHostID: String?
+    private var lastClientSnapshotLogTime: TimeInterval = 0
+    private var lastClientRenderLogTime: TimeInterval = 0
     private var isMultiplayerClient: Bool {
         multiplayerCoordinator?.role == .client
     }
@@ -256,7 +243,6 @@ final class GameScene: SKScene {
         )
         coordinator.onRoleChanged = { [weak self] role in
             guard let self else { return }
-            print("[Multiplayer] scene roleChanged role=\(role) localPeerID=\(session.localPeerID)")
             switch role {
             case .host:
                 self.hostID = session.localPeerID
@@ -271,12 +257,10 @@ final class GameScene: SKScene {
         }
         coordinator.onPeerJoined = { [weak self] peerID in
             guard let self, let transport = self.multiplayerTransport else { return }
-            print("[Multiplayer] scene peerJoined peer=\(peerID)")
             self.addJoinedPlayerToAuthoritativeState(peerID: peerID)
             self.sendBoardSnapshot(using: transport)
         }
         coordinator.onHostLost = { [weak self] _ in
-            print("[Multiplayer] scene hostLost")
             self?.triggerGameOver()
         }
         multiplayerCoordinator = coordinator
@@ -505,13 +489,24 @@ final class GameScene: SKScene {
             wantsToAttack: true
         )
         latestLocalPlayerInput = input
+        initializedMultiplayerTargets.insert(session.localPeerID)
         clientPredictionHistory.record(input)
         let steps = driver.advance(elapsedTime: dt, inputs: [input])
         clientPredictionDriver = driver
         guard let state = steps.last,
               let localPlayer = state.state.players.first(where: { $0.id == session.localPeerID }) else { return }
-        playerNode.position = localPlayer.position.cgPoint
-        playerNode.zRotation = CGFloat(localPlayer.rotation)
+        playerNode.position = MultiplayerInterpolation.position(
+            current: playerNode.position,
+            target: localPlayer.position.cgPoint,
+            deltaTime: dt,
+            responsiveness: 6
+        )
+        playerNode.zRotation = MultiplayerInterpolation.angle(
+            current: playerNode.zRotation,
+            target: CGFloat(localPlayer.rotation),
+            deltaTime: dt,
+            responsiveness: 6
+        )
     }
 
     private func currentAimAngle() -> Double {
@@ -1067,13 +1062,17 @@ final class GameScene: SKScene {
             simulation: GameSimulation()
         )
         clientPredictionDriver = FixedTickSimulationDriver(initialState: reconciledState)
+        logClientSnapshot(board: board, predictedState: reconciledState)
 
         killCount = board.killCount
         hudManager.updateKillCount(killCount)
 
         for state in board.players {
             if state.id == multiplayerTransport?.localPeerID {
-                setMultiplayerTarget(state.position, for: state.id, on: playerNode)
+                if !initializedMultiplayerTargets.contains(state.id) {
+                    playerNode.position = state.position
+                    initializedMultiplayerTargets.insert(state.id)
+                }
                 playerNode.apply(multiplayerState: state)
                 hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
                 hudManager.updateWeapon(
@@ -1083,8 +1082,20 @@ final class GameScene: SKScene {
                     fireRate: playerNode.currentWeaponFireRate
                 )
                 if let predictedPlayer = reconciledState.players.first(where: { $0.id == state.id }) {
-                    playerNode.position = predictedPlayer.position.cgPoint
-                    playerNode.zRotation = CGFloat(predictedPlayer.rotation)
+                    // Keep the simulation state authoritative while blending the
+                    // visible node toward it to avoid a correction teleport.
+                    playerNode.position = MultiplayerInterpolation.position(
+                        current: playerNode.position,
+                        target: predictedPlayer.position.cgPoint,
+                        deltaTime: 0.1,
+                        responsiveness: 2.5
+                    )
+                    playerNode.zRotation = MultiplayerInterpolation.angle(
+                        current: playerNode.zRotation,
+                        target: CGFloat(predictedPlayer.rotation),
+                        deltaTime: 0.1,
+                        responsiveness: 2.5
+                    )
                 }
             } else {
                 applyRemotePlayer(state, shouldSpawnNearHost: false)
@@ -1120,7 +1131,7 @@ final class GameScene: SKScene {
                     maxExtrapolationTicks: maxExtrapolationTicks
                 ) {
                     multiplayerTargetPositions[id] = sampled
-                    player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 14)
+                    player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 6)
                 }
             }
             for node in zombies + chests + powerUps {
@@ -1132,8 +1143,9 @@ final class GameScene: SKScene {
                           maxExtrapolationTicks: maxExtrapolationTicks
                       ) else { continue }
                 multiplayerTargetPositions[id] = sampled
-                node.position = MultiplayerInterpolation.position(current: node.position, target: sampled, deltaTime: dt, responsiveness: 10)
+                node.position = MultiplayerInterpolation.position(current: node.position, target: sampled, deltaTime: dt, responsiveness: 6)
             }
+            logClientRenderState()
             return
         }
         if let target = multiplayerTargetPositions[multiplayerTransport?.localPeerID ?? ""] {
@@ -1147,6 +1159,43 @@ final class GameScene: SKScene {
             guard let id = node.name, let target = multiplayerTargetPositions[id] else { continue }
             node.position = MultiplayerInterpolation.position(current: node.position, target: target, deltaTime: dt, responsiveness: 10)
         }
+    }
+
+    private func logClientSnapshot(board: MultiplayerBoardState, predictedState: GameState) {
+        let now = Date().timeIntervalSince1970
+        guard now - lastClientSnapshotLogTime >= 0.2 else { return }
+        lastClientSnapshotLogTime = now
+
+        let localID = multiplayerTransport?.localPeerID ?? "unknown"
+        let authoritative = board.players.first { $0.id == localID }?.position ?? .zero
+        let predicted = predictedState.players.first { $0.id == localID }?.position.cgPoint ?? .zero
+        let correction = hypot(predicted.x - authoritative.x, predicted.y - authoritative.y)
+        let ageMilliseconds = max(0, (now - board.serverTime) * 1_000)
+        let remotePositions = board.players
+            .filter { $0.id != localID }
+            .map { "\($0.id.prefix(8))=\(format($0.position))" }
+            .joined(separator: ",")
+
+        print("[Multiplayer][ClientSnapshot] seq=\(board.sequence) tick=\(board.simulationTick) ageMs=\(String(format: "%.1f", ageMilliseconds)) buffer=\(receivedSnapshotBuffer.snapshots.count) localAuth=\(format(authoritative)) localPred=\(format(predicted)) correction=\(String(format: "%.1f", correction)) remote=\(remotePositions)")
+    }
+
+    private func logClientRenderState() {
+        let now = Date().timeIntervalSince1970
+        guard now - lastClientRenderLogTime >= 0.2 else { return }
+
+        let remotePositions = remotePlayers
+            .sorted { $0.key < $1.key }
+            .map { id, player in
+                let target = multiplayerTargetPositions[id] ?? .zero
+                return "\(id.prefix(8))=actual:\(format(player.position)),target:\(format(target))"
+            }
+            .joined(separator: ",")
+        print("[Multiplayer][ClientRender] renderTick=\(UInt64(max(0, multiplayerRenderTick.rounded(.down)))) local=\(format(playerNode.position)) remote=\(remotePositions)")
+        lastClientRenderLogTime = now
+    }
+
+    private func format(_ point: CGPoint) -> String {
+        "(\(String(format: "%.1f", point.x)),\(String(format: "%.1f", point.y)))"
     }
 
     private func reconcileZombies(_ states: [MultiplayerZombieState]) {
@@ -1305,7 +1354,6 @@ final class GameScene: SKScene {
 
 extension GameScene {
     fileprivate func handleMultiplayerMessage(_ message: MultiplayerWireMessage) {
-        print("[Multiplayer] scene handling message=\(message.logNameForDiagnostics)")
         switch message {
         case let .playerUpdate(state):
             knownPlayerStates[state.id] = state
