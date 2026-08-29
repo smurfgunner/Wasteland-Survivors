@@ -140,15 +140,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
                 wantsToCollectPowerUpID: nil
             )
         }
-        let now = Date().timeIntervalSince1970
-        if now - lastInputConsumeLogTime >= 0.2, !inputsToApply.isEmpty {
-            lastInputConsumeLogTime = now
-            let summary = inputsToApply.map {
-                "\($0.playerID.prefix(8))=seq:\($0.sequence),move:(\(String(format: "%.2f", $0.movementX)),\(String(format: "%.2f", $0.movementY)))"
-            }.joined(separator: ",")
-            let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
-            print("[Multiplayer][HostInputConsume] timeMs=\(String(format: "%.1f", timestampMilliseconds)) count=\(inputsToApply.count) retained=\(latestInputs.count) inputs=\(summary)")
-        }
         queuedInputs.removeAll()
         return inputsToApply
     }
@@ -365,12 +356,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         latestInputSequences[input.playerID] = input.sequence
         latestInputs[input.playerID] = input
         queuedInputs.append(input)
-        let now = Date().timeIntervalSince1970
-        if now - lastInputReceiveLogTime >= 0.2 {
-            lastInputReceiveLogTime = now
-            let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
-            print("[Multiplayer][HostInputReceive] timeMs=\(String(format: "%.1f", timestampMilliseconds)) player=\(input.playerID.prefix(8)) seq=\(input.sequence) movement=(\(String(format: "%.2f", input.movementX)),\(String(format: "%.2f", input.movementY)))")
-        }
         onInput?(input)
     }
 

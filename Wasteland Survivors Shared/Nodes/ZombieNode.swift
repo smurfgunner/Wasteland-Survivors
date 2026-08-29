@@ -113,14 +113,17 @@ final class ZombieNode: SKNode {
 
     func apply(multiplayerHealth: CGFloat) {
         let authoritativeHealth = Swift.max(0, Swift.min(60, multiplayerHealth))
-        if authoritativeHealth > 0, isDead {
-            revive()
-        }
-
         health = authoritativeHealth
         healthBar.xScale = health / 60
         if health <= 0 {
-            die()
+            if !isDead {
+                die()
+            }
+            return
+        }
+
+        if isDead {
+            revive()
         }
     }
 

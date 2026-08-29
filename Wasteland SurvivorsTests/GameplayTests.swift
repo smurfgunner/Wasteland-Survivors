@@ -87,6 +87,19 @@ struct GameplayTests {
         #expect(scene.worldNode.children.contains { $0 is PowerUpNode })
     }
 
+    @Test("Repeated authoritative death snapshots do not restart zombie cleanup")
+    func repeatedAuthoritativeDeathSnapshotsDoNotRestartZombieCleanup() {
+        let zombie = ZombieNode(randomSource: FixedRandomSource())
+
+        zombie.apply(multiplayerHealth: 0)
+        let firstDeathAnimation = zombie.action(forKey: "deathAnimation")
+
+        zombie.apply(multiplayerHealth: 0)
+        let secondDeathAnimation = zombie.action(forKey: "deathAnimation")
+
+        #expect(firstDeathAnimation === secondDeathAnimation)
+    }
+
     @Test("Weapon definitions expose stable combat behavior")
     func weaponDefinitionsRemainStable() {
         #expect(WeaponType.pistol.category == .ranged)
