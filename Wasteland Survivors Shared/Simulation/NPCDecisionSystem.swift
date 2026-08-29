@@ -17,6 +17,16 @@ enum NPCDecisionSystem {
             }
     }
 
+    static func nextRotation(
+        for zombie: GameZombieState,
+        toward target: GamePlayerState
+    ) -> Double {
+        atan2(
+            target.position.y - zombie.position.y,
+            target.position.x - zombie.position.x
+        )
+    }
+
     static func nextPosition(
         for zombie: GameZombieState,
         toward target: GamePlayerState,

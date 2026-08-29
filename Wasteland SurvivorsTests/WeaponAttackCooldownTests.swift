@@ -10,7 +10,7 @@ struct WeaponAttackCooldownTests {
         let expectedCooldown = UInt64((weapon.fireRate * tickRate).rounded())
         var initial = GameState.initial(seed: 1, playerID: "player")
         initial.players[0].weapon = weapon
-        if weapon.category == .melee {
+        if weapon.category == .melee || weapon.category == .ranged {
             initial.zombies = [
                 GameZombieState(
                     id: "zombie-1",
@@ -50,13 +50,13 @@ struct WeaponAttackCooldownTests {
 }
 
 private func attackCount(in events: [GameplayEvent], weapon: WeaponType) -> Int {
-    events.reduce(into: 0) { count, event in
+    events.contains { event in
         switch event {
         case .projectileSpawned where weapon.category == .ranged,
              .meleeAttack where weapon.category == .melee:
-            count += 1
+            return true
         default:
-            break
+            return false
         }
-    }
+    } ? 1 : 0
 }

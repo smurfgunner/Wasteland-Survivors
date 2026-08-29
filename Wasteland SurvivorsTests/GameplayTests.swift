@@ -263,6 +263,22 @@ struct GameplayTests {
         #expect(!player.updateHealth(deltaTime: 1))
     }
     
+    @Test("Replicated zero zombie health transitions the node to its death state")
+    func replicatedZeroZombieHealthTransitionsNodeToDeathState() {
+        // Given a live zombie node receiving an authoritative health update.
+        let zombie = ZombieNode()
+        let world = SKNode()
+        world.addChild(zombie)
+
+        // When the authoritative state reports zero health.
+        zombie.apply(multiplayerHealth: 0)
+
+        // Then the presentation node is dead and no longer participates in physics.
+        #expect(zombie.health == 0)
+        #expect(zombie.isDead)
+        #expect(zombie.physicsBody == nil)
+    }
+
     @Test("Zombie damage updates health and death state")
     func zombieDamageUpdatesHealthAndDeathState() {
         let zombie = ZombieNode()

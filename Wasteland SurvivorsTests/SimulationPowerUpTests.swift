@@ -8,6 +8,12 @@ struct SimulationPowerUpTests {
         // Given a player with a damage power-up and a ranged weapon.
         var state = GameState.initial(seed: 1, playerID: "player")
         state.players[0].powerUps = [.damage]
+        state.zombies = [GameZombieState(
+            id: "zombie-1",
+            position: CGPointValue(x: 100, y: 0),
+            rotation: 0,
+            health: 1_000
+        )]
 
         // When the player attacks in the authoritative simulation.
         let result = GameSimulation().advance(
@@ -56,6 +62,12 @@ struct SimulationPowerUpTests {
         // Given equivalent players with the same mixed power-ups in different orders and with a duplicate.
         var firstState = GameState.initial(seed: 1, playerID: "player")
         firstState.players[0].powerUps = [.damage, .range, .fireRate]
+        firstState.zombies = [GameZombieState(
+            id: "zombie-1",
+            position: CGPointValue(x: 100, y: 0),
+            rotation: 0,
+            health: 1_000
+        )]
         var secondState = firstState
         secondState.players[0].powerUps = [.fireRate, .damage, .damage, .range]
         let attack = PlayerInput(playerID: "player", sequence: 1, movement: .zero, wantsToAttack: true)
@@ -74,6 +86,12 @@ struct SimulationPowerUpTests {
         // Given a player with a fire-rate power-up and a ranged weapon.
         var state = GameState.initial(seed: 1, playerID: "player")
         state.players[0].powerUps = [.fireRate]
+        state.zombies = [GameZombieState(
+            id: "zombie-1",
+            position: CGPointValue(x: 100, y: 0),
+            rotation: 0,
+            health: 1_000
+        )]
         let simulation = GameSimulation()
         let attack = PlayerInput(playerID: "player", sequence: 1, movement: .zero, wantsToAttack: true)
 

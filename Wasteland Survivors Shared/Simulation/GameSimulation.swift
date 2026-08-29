@@ -246,7 +246,7 @@ struct GameSimulation {
 
         static let standard = Self(
             playerSpeed: 180,
-            zombieSpeed: 55,
+            zombieSpeed: 77.5,
             tickRate: 60,
             zombieDamage: 12,
             attackRange: 160,
@@ -301,8 +301,6 @@ struct GameSimulation {
                 x: input.movement.x * scale * configuration.playerSpeed / configuration.tickRate,
                 y: input.movement.y * scale * configuration.playerSpeed / configuration.tickRate
             )
-            next.players[index].rotation = input.aimAngle
-
             InteractionResolutionSystem.resolve(
                 input: input,
                 playerIndex: index,
@@ -312,13 +310,30 @@ struct GameSimulation {
                 events: &events
             )
 
+            let playerPosition = next.players[index].position
+            let attackTargetIndex = nearestLivingZombie(to: playerPosition, in: next.zombies)
+                .flatMap { zombieIndex in
+                    let attackRange = configuration.attackRange(for: next.players[index])
+                    return playerPosition.distance(to: next.zombies[zombieIndex].position) <= attackRange
+                        ? zombieIndex
+                        : nil
+                }
+            if let attackTargetIndex {
+                let target = next.zombies[attackTargetIndex]
+                next.players[index].rotation = atan2(
+                    target.position.y - playerPosition.y,
+                    target.position.x - playerPosition.x
+                )
+            } else {
+                next.players[index].rotation = input.aimAngle
+            }
+
             let cooldownTicks = configuration.attackCooldownTicks(for: next.players[index])
             let canAttack = next.lastAttackTickByPlayer[next.players[index].id]
                 .map { tick >= $0 + cooldownTicks } ?? true
             if input.wantsToAttack, canAttack,
                next.players[index].weapon.category == .melee,
-               let zombieIndex = nearestLivingZombie(to: next.players[index].position, in: next.zombies),
-               next.players[index].position.distance(to: next.zombies[zombieIndex].position) <= configuration.attackRange(for: next.players[index]) {
+               let zombieIndex = attackTargetIndex {
                 next.lastAttackTickByPlayer[next.players[index].id] = tick
                 let eventID = "melee-\(next.tick)-\(next.players[index].id)"
                 let damage = configuration.damage(for: next.players[index])
@@ -330,20 +345,26 @@ struct GameSimulation {
                     events.append(.zombieKilled(id: next.zombies[zombieIndex].id, ownerID: next.players[index].id))
                 }
             } else if input.wantsToAttack, canAttack,
-                      next.players[index].weapon.category == .ranged {
+                      next.players[index].weapon.category == .ranged,
+                      attackTargetIndex != nil {
                 let player = next.players[index]
                 next.lastAttackTickByPlayer[player.id] = tick
-                let projectileID = "projectile-\(tick)-\(player.id)"
-                next.projectiles.append(GameProjectileState(
-                    id: projectileID,
-                    ownerID: player.id,
-                    position: player.position,
-                    angle: player.rotation,
-                    weapon: player.weapon,
-                    damage: configuration.damage(for: player),
-                    spawnedTick: tick
-                ))
-                events.append(.projectileSpawned(id: projectileID, ownerID: player.id))
+                let spreadAngles = player.weapon == .shotgun ? [-0.18, 0.0, 0.18] : [0.0]
+                for (spreadIndex, spreadAngle) in spreadAngles.enumerated() {
+                    let projectileID = spreadAngles.count == 1
+                        ? "projectile-\(tick)-\(player.id)"
+                        : "projectile-\(tick)-\(player.id)-\(spreadIndex)"
+                    next.projectiles.append(GameProjectileState(
+                        id: projectileID,
+                        ownerID: player.id,
+                        position: player.position,
+                        angle: player.rotation + spreadAngle,
+                        weapon: player.weapon,
+                        damage: configuration.damage(for: player),
+                        spawnedTick: tick
+                    ))
+                    events.append(.projectileSpawned(id: projectileID, ownerID: player.id))
+                }
             }
         }
 
@@ -389,6 +410,10 @@ struct GameSimulation {
                 for: next.zombies[index],
                 players: next.players
             ) else { continue }
+            next.zombies[index].rotation = NPCDecisionSystem.nextRotation(
+                for: next.zombies[index],
+                toward: target
+            )
             next.zombies[index].position = NPCDecisionSystem.nextPosition(
                 for: next.zombies[index],
                 toward: target,

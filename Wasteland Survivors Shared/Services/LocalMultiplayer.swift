@@ -544,16 +544,19 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
     func connect() {
         diagnostic("connecting localPeerID=\(localPeerID)")
         if let appleAdapter {
+            diagnostic("using injected Apple Multipeer Connectivity adapter")
             appleAdapter.delegate = self
             appleAdapter.connect()
             return
         }
         isDisconnecting = false
         state = .connecting
+        diagnostic("transport state=connecting")
         delegate?.transport(self, didChange: state)
         let session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
         session.delegate = self
         self.session = session
+        diagnostic("MCSession created encryption=required")
 
         let advertiser = MCNearbyServiceAdvertiser(
             peer: peerID,
@@ -563,11 +566,13 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
         advertiser.delegate = self
         advertiser.startAdvertisingPeer()
         self.advertiser = advertiser
+        diagnostic("advertising started serviceType=\(serviceType)")
 
         let browser = MCNearbyServiceBrowser(peer: peerID, serviceType: serviceType)
         browser.delegate = self
         browser.startBrowsingForPeers()
         self.browser = browser
+        diagnostic("browsing started serviceType=\(serviceType)")
     }
 
     func disconnect() {
@@ -577,6 +582,7 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
             return
         }
         isDisconnecting = true
+        diagnostic("disconnect requested")
         advertiser?.stopAdvertisingPeer()
         browser?.stopBrowsingForPeers()
         session?.disconnect()
@@ -597,13 +603,18 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
             try appleAdapter.send(data, to: peerID, delivery: delivery)
             return
         }
-        guard state == .connected else { throw MultiplayerTransportError.notConnected }
+        guard state == .connected else {
+            diagnostic("send skipped reason=notConnected state=\(state) peer=\(peerID)")
+            throw MultiplayerTransportError.notConnected
+        }
         guard let session,
               let peer = session.connectedPeers.first(where: { $0.displayName == peerID }) else {
+            diagnostic("send skipped reason=peerUnavailable peer=\(peerID) connectedPeers=\(connectedPeerIDs.sorted())")
             throw MultiplayerTransportError.peerUnavailable
         }
         let mode: MCSessionSendDataMode = delivery == .reliable ? .reliable : .unreliable
         try session.send(data, toPeers: [peer], with: mode)
+        diagnostic("send completed to=\(peerID)")
     }
 
     func broadcast(_ data: Data) throws {
@@ -616,10 +627,17 @@ final class MultipeerConnectivitySession: NSObject, MultiplayerTransport {
             try appleAdapter.broadcast(data, delivery: delivery)
             return
         }
-        guard state == .connected else { throw MultiplayerTransportError.notConnected }
-        guard let session, !session.connectedPeers.isEmpty else { throw MultiplayerTransportError.peerUnavailable }
+        guard state == .connected else {
+            diagnostic("broadcast skipped reason=notConnected state=\(state)")
+            throw MultiplayerTransportError.notConnected
+        }
+        guard let session, !session.connectedPeers.isEmpty else {
+            diagnostic("broadcast skipped reason=peerUnavailable connectedPeers=\(connectedPeerIDs.sorted())")
+            throw MultiplayerTransportError.peerUnavailable
+        }
         let mode: MCSessionSendDataMode = delivery == .reliable ? .reliable : .unreliable
         try session.send(data, toPeers: session.connectedPeers, with: mode)
+        diagnostic("broadcast completed peers=\(session.connectedPeers.map(\.displayName).sorted())")
     }
 }
 
@@ -630,10 +648,13 @@ extension MultipeerConnectivitySession: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
+        diagnostic("invitation received from peer=\(peerID.displayName) hasSession=\(session != nil)")
         invitationHandler(true, session)
     }
 
-    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {}
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        diagnostic("advertising failed error=\(error.localizedDescription)")
+    }
 }
 
 extension MultipeerConnectivitySession: MCNearbyServiceBrowserDelegate {
@@ -642,12 +663,16 @@ extension MultipeerConnectivitySession: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
+        diagnostic("peer discovered peer=\(peerID.displayName) info=\(info ?? [:]) hasSession=\(session != nil)")
         guard peerID != self.peerID, let session else { return }
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
+        diagnostic("invitation sent to peer=\(peerID.displayName)")
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
-    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {}
+    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        diagnostic("browsing failed error=\(error.localizedDescription)")
+    }
 }
 
 extension MultipeerConnectivitySession: AppleMultipeerConnectivityAdapterDelegate {

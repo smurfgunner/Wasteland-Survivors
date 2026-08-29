@@ -31,6 +31,26 @@ struct MultiplayerSessionCoordinatorTests {
         )))
     }
 
+    @Test("Starting a session waits for an asynchronous transport connection before sending the handshake")
+    @MainActor
+    func asynchronousConnectionSendsHandshakeAfterConnection() throws {
+        let session = CoordinatorTestSession(localPlayerID: "local")
+        session.connectsImmediately = false
+        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 10)
+
+        coordinator.start()
+        #expect(session.messages.isEmpty)
+
+        session.finishConnecting()
+
+        #expect(session.messages == [.hello(.init(
+            sessionID: "match",
+            peerID: "local",
+            startedAt: 10,
+            protocolVersion: 1
+        ))])
+    }
+
     @Test("An earlier peer becomes the explicit host")
     @MainActor
     func earlierPeerBecomesHost() throws {
@@ -57,6 +77,63 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.hostID == "host")
         #expect(session.messages.contains {
             if case .joinRequest = $0 { return true }
+            return false
+        })
+    }
+
+    @Test("A later peer adopts the active session ID before requesting to join")
+    @MainActor
+    func laterPeerAdoptsActiveSessionIDBeforeRequestingToJoin() throws {
+        let session = CoordinatorTestSession(localPlayerID: "local")
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "local-session",
+            startedAt: 20
+        )
+        coordinator.start()
+
+        let activePeerHello = MultiplayerWireMessage.hello(.init(
+            sessionID: "active-session",
+            peerID: "host",
+            startedAt: 10,
+            protocolVersion: 1
+        ))
+        session.deliver(try activePeerHello.encoded())
+
+        #expect(coordinator.role == .client)
+        #expect(coordinator.hostID == "host")
+        #expect(session.messages.contains {
+            if case let .joinRequest(request) = $0 {
+                return request.sessionID == "active-session"
+            }
+            return false
+        })
+    }
+
+    @Test("The earliest peer keeps its session ID when establishing the active session")
+    @MainActor
+    func earliestPeerKeepsItsSessionIDWhenEstablishingActiveSession() throws {
+        let session = CoordinatorTestSession(localPlayerID: "host")
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "host-session",
+            startedAt: 10
+        )
+        coordinator.start()
+
+        let laterPeerHello = MultiplayerWireMessage.hello(.init(
+            sessionID: "later-session",
+            peerID: "client",
+            startedAt: 20,
+            protocolVersion: 1
+        ))
+        session.deliver(try laterPeerHello.encoded())
+
+        #expect(coordinator.role == .host)
+        #expect(session.messages.contains {
+            if case let .hostAnnouncement(announcement) = $0 {
+                return announcement.sessionID == "host-session"
+            }
             return false
         })
     }
@@ -478,7 +555,7 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.acknowledgedInputSequences == ["client": 7])
     }
 
-    @Test("Messages from another session or protocol version cannot alter negotiation")
+    @Test("Messages with an unsupported protocol version cannot alter negotiation")
     @MainActor
     func incompatibleMessagesCannotAlterNegotiation() throws {
         let session = CoordinatorTestSession(localPlayerID: "local")
@@ -490,12 +567,6 @@ struct MultiplayerSessionCoordinatorTests {
         coordinator.start()
         let initialMessageCount = session.messages.count
 
-        let foreignSessionHello = MultiplayerWireMessage.hello(.init(
-            sessionID: "other-match",
-            peerID: "foreign",
-            startedAt: 1,
-            protocolVersion: 1
-        ))
         let incompatibleVersionHello = MultiplayerWireMessage.hello(.init(
             sessionID: "match",
             peerID: "future",
@@ -503,7 +574,6 @@ struct MultiplayerSessionCoordinatorTests {
             protocolVersion: 999
         ))
 
-        session.deliver(try foreignSessionHello.encoded())
         session.deliver(try incompatibleVersionHello.encoded())
 
         #expect(coordinator.role == .negotiating)
@@ -1013,6 +1083,7 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     var broadcastError: MultiplayerTransportError?
     var sendError: MultiplayerTransportError?
     var holdDeliveries = false
+    var connectsImmediately = true
     private var heldData: [Data] = []
 
     init(localPlayerID: String) {
@@ -1020,6 +1091,11 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     }
 
     func connect() {
+        state = connectsImmediately ? .connected : .connecting
+        delegate?.transport(self, didChange: state)
+    }
+
+    func finishConnecting() {
         state = .connected
         delegate?.transport(self, didChange: state)
     }
@@ -1036,6 +1112,7 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     }
 
     func send(_ data: Data, to peerID: String) throws {
+        guard state == .connected else { throw MultiplayerTransportError.notConnected }
         if let sendError { throw sendError }
         directedPeerIDs.append(peerID)
         record(data)
@@ -1047,6 +1124,7 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     }
 
     func broadcast(_ data: Data) throws {
+        guard state == .connected else { throw MultiplayerTransportError.notConnected }
         if let broadcastError { throw broadcastError }
         record(data)
     }

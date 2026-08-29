@@ -200,6 +200,12 @@ struct MultiplayerArchitectureTests {
     func rangedAttackCreatesDeterministicProjectile() {
         var initial = GameState.initial(seed: 1, playerID: "player")
         initial.players[0].weapon = .rifle
+        initial.zombies = [GameZombieState(
+            id: "zombie-1",
+            position: CGPointValue(x: 100, y: 0),
+            rotation: 0,
+            health: 1_000
+        )]
         let simulation = GameSimulation()
         let input = PlayerInput(
             playerID: "player",
@@ -248,6 +254,12 @@ struct MultiplayerArchitectureTests {
     func unresolvedProjectilesExpireAfterDeterministicLifetime() {
         var initial = GameState.initial(seed: 1, playerID: "player")
         initial.players[0].weapon = .rifle
+        initial.zombies = [GameZombieState(
+            id: "zombie-1",
+            position: CGPointValue(x: 100, y: 0),
+            rotation: 0,
+            health: 1_000
+        )]
         let simulation = GameSimulation()
         let input = PlayerInput(
             playerID: "player",

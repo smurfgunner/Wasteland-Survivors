@@ -259,6 +259,41 @@ struct LocalMultiplayerTests {
         #expect(!transferredBoard.chests.isEmpty)
     }
 
+    @Test("Host renders and simulates a joined player on the shared world canvas")
+    @MainActor
+    func hostRendersJoinedPlayerOnSharedWorldCanvas() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match", peerID: "client", startedAt: 9_999_999_999, protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match", peerID: "client", protocolVersion: 1
+        )).encoded(), from: "client")
+        session.deliver(try MultiplayerWireMessage.playerInput(.init(
+            playerID: "client", sequence: 1, movement: .zero, aimAngle: 0, wantsToAttack: false
+        )).encoded(), from: "client")
+
+        scene.update(0)
+        scene.update(1.0 / 60.0)
+
+        #expect(scene.remotePlayers["client"]?.parent === scene.worldNode)
+        let snapshot = try #require(session.sentData.compactMap { data -> MultiplayerBoardState? in
+            guard case let .boardSnapshot(board) = try? MultiplayerWireMessage.decode(data) else { return nil }
+            return board
+        }.last)
+        #expect(snapshot.players.contains { $0.id == "client" })
+    }
+
     @Test("Authoritative simulation is independent of render frame partitioning")
     @MainActor
     func authoritativeSimulationIsIndependentOfRenderFramePartitioning() throws {
@@ -399,6 +434,128 @@ struct LocalMultiplayerTests {
         try await Task.sleep(for: .milliseconds(50))
         #expect(scene.zombies.isEmpty)
         #expect(scene.worldNode.children.contains { $0 is ProjectileNode } == false)
+    }
+
+    @Test("Client applies replicated remote player rotation to its real scene")
+    @MainActor
+    func clientAppliesReplicatedRemotePlayerRotationToRealScene() async throws {
+        // Given a client that has accepted the host and receives a rotated host state.
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        let expectedRotation = CGFloat.pi / 2
+        let board = MultiplayerBoardState(
+            sequence: 1,
+            simulationTick: 1,
+            hostID: "host",
+            players: [
+                MultiplayerPlayerState(
+                    id: "host",
+                    position: CGPoint(x: 100, y: 100),
+                    color: .blue,
+                    rotation: expectedRotation
+                ),
+                MultiplayerPlayerState(
+                    id: "client",
+                    position: .zero,
+                    color: .red
+                )
+            ],
+            zombies: [],
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            killCount: 0
+        )
+
+        // When the authoritative board snapshot is delivered.
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Then the remote player faces the replicated direction.
+        #expect(abs((scene.remotePlayers["host"]?.zRotation ?? 0) - expectedRotation) < 0.001)
+    }
+
+    @Test("Client keeps the remote player in the shared world after camera and interpolation updates")
+    @MainActor
+    func clientKeepsRemotePlayerInSharedWorldAfterRenderUpdates() async throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+
+        for tick in 1...4 {
+            let board = MultiplayerBoardState(
+                sequence: UInt64(tick),
+                simulationTick: UInt64(tick),
+                hostID: "host",
+                players: [
+                    MultiplayerPlayerState(id: "host", position: CGPoint(x: 100 + tick * 10, y: 100), color: .blue),
+                    MultiplayerPlayerState(id: "client", position: CGPoint(x: 0, y: 0), color: .red)
+                ],
+                zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0
+            )
+            session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded())
+            scene.update(Double(tick) / 60.0)
+        }
+
+        let remotePlayer = try #require(scene.remotePlayers["host"])
+        #expect(remotePlayer.parent === scene.worldNode)
+        #expect(scene.playerNode.parent === scene.worldNode)
+        #expect(scene.cameraNode.position == scene.playerNode.position)
+        #expect(scene.worldNode.convert(remotePlayer.position, to: scene) != scene.cameraNode.position)
+    }
+
+    @Test("Host advances a joined player's authoritative position from peer input")
+    @MainActor
+    func hostAdvancesJoinedPlayerFromPeerInput() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match", peerID: "client", startedAt: 9_999_999_999, protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match", peerID: "client", protocolVersion: 1
+        )).encoded(), from: "client")
+
+        let initialPosition = try #require(scene.remotePlayers["client"]?.position)
+        session.deliver(try MultiplayerWireMessage.playerInput(.init(
+            playerID: "client", sequence: 1, movement: CGVector(dx: 1, dy: 0), aimAngle: 0, wantsToAttack: false
+        )).encoded(), from: "client")
+        scene.update(0)
+        scene.update(1.0 / 60.0)
+
+        let movedPosition = try #require(scene.remotePlayers["client"]?.position)
+        #expect(movedPosition.x > initialPosition.x)
     }
 
     @Test("Client applies an authorized match-ended event to its presentation")

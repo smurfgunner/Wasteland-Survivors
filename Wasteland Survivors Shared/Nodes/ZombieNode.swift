@@ -112,8 +112,12 @@ final class ZombieNode: SKNode {
     }
 
     func apply(multiplayerHealth: CGFloat) {
+        guard !isDead else { return }
         health = Swift.max(0, Swift.min(60, multiplayerHealth))
         healthBar.xScale = health / 60
+        if health <= 0 {
+            die()
+        }
     }
     
     private func die() {

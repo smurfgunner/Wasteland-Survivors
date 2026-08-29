@@ -13,6 +13,21 @@ import UIKit
 import AppKit
 #endif
 
+private extension MultiplayerWireMessage {
+    var logNameForDiagnostics: String {
+        switch self {
+        case .hello: return "hello"
+        case .hostAnnouncement: return "hostAnnouncement"
+        case .joinRequest: return "joinRequest"
+        case .joinAccepted: return "joinAccepted"
+        case .playerUpdate: return "playerUpdate"
+        case .boardSnapshot: return "boardSnapshot"
+        case .playerInput: return "playerInput"
+        case .gameplayEvent: return "gameplayEvent"
+        }
+    }
+}
+
 final class GameScene: SKScene {
     enum MenuState: Equatable {
         case main
@@ -241,6 +256,7 @@ final class GameScene: SKScene {
         )
         coordinator.onRoleChanged = { [weak self] role in
             guard let self else { return }
+            print("[Multiplayer] scene roleChanged role=\(role) localPeerID=\(session.localPeerID)")
             switch role {
             case .host:
                 self.hostID = session.localPeerID
@@ -253,11 +269,14 @@ final class GameScene: SKScene {
         coordinator.onMessage = { [weak self] message in
             self?.handleMultiplayerMessage(message)
         }
-        coordinator.onPeerJoined = { [weak self] _ in
+        coordinator.onPeerJoined = { [weak self] peerID in
             guard let self, let transport = self.multiplayerTransport else { return }
+            print("[Multiplayer] scene peerJoined peer=\(peerID)")
+            self.addJoinedPlayerToAuthoritativeState(peerID: peerID)
             self.sendBoardSnapshot(using: transport)
         }
         coordinator.onHostLost = { [weak self] _ in
+            print("[Multiplayer] scene hostLost")
             self?.triggerGameOver()
         }
         multiplayerCoordinator = coordinator
@@ -341,7 +360,6 @@ final class GameScene: SKScene {
         cameraNode.position = playerNode.position
 
         if !isAuthoritativeMultiplayerHost && !isMultiplayerClient {
-            interpolateMultiplayerNodes(dt: dt)
             return
         }
 
@@ -357,14 +375,22 @@ final class GameScene: SKScene {
             playerID: "offline-player",
             sequence: driver.state.tick &+ 1,
             movement: CGPointValue(currentMovementDirection()),
-            aimAngle: Double(playerNode.zRotation),
+            aimAngle: currentAimAngle(),
             wantsToAttack: true
         )
         let steps = driver.advance(elapsedTime: dt, inputs: [input])
         offlineSimulationDriver = driver
         guard let state = steps.last else { return }
         authoritativeGameState = state.state
-        applyOfflineStateToScene(state.state)
+        for step in steps {
+            renderSimulationAttackEvents(step.events, state: step.state)
+        }
+        applyAuthoritativeStateToScene(
+            state.state,
+            localPlayerID: "offline-player",
+            playerColors: ["offline-player": .blue],
+            sessionStartTimes: [:]
+        )
     }
 
     /// Keeps the legacy node-facing helpers usable while the fixed-tick state
@@ -408,19 +434,27 @@ final class GameScene: SKScene {
         driver.replaceState(state)
     }
 
-    private func applyOfflineStateToScene(_ state: GameState) {
+    private func applyAuthoritativeStateToScene(
+        _ state: GameState,
+        localPlayerID: String,
+        playerColors: [String: MultiplayerPlayerColor],
+        sessionStartTimes: [String: TimeInterval]
+    ) {
         let board = GameStateMultiplayerMapper.boardState(
             from: state,
             sequence: state.tick,
             timestamp: 0,
-            hostID: "offline-player",
-            playerColors: ["offline-player": .blue],
-            sessionStartTimes: [:]
+            hostID: localPlayerID,
+            playerColors: playerColors,
+            sessionStartTimes: sessionStartTimes
         )
-        guard let localPlayerState = board.players.first else { return }
+        guard let localPlayerState = board.players.first(where: { $0.id == localPlayerID }) else { return }
         playerNode.position = localPlayerState.position
         playerNode.zRotation = localPlayerState.rotation
         playerNode.apply(multiplayerState: localPlayerState)
+        for playerState in board.players where playerState.id != localPlayerID {
+            applyRemotePlayer(playerState, shouldSpawnNearHost: false)
+        }
         killCount = board.killCount
         isGameOver = board.isGameOver
         hudManager.updateKillCount(killCount)
@@ -435,6 +469,28 @@ final class GameScene: SKScene {
         reconcileChests(board.chests)
         reconcilePowerUps(board.powerUps)
         reconcileProjectiles(board.projectiles)
+        applyAuthoritativeEntityPositions(board)
+    }
+
+    private func applyAuthoritativeEntityPositions(_ board: MultiplayerBoardState) {
+        let zombieStates = Dictionary(uniqueKeysWithValues: board.zombies.map { ($0.id, $0) })
+        for zombie in zombies {
+            guard let state = zombieStates[zombie.multiplayerID] else { continue }
+            zombie.position = CGPoint(x: state.x, y: state.y)
+            zombie.zRotation = CGFloat(state.rotation)
+        }
+
+        let chestStates = Dictionary(uniqueKeysWithValues: board.chests.map { ($0.id, $0) })
+        for chest in chests {
+            guard let state = chestStates[chest.multiplayerID] else { continue }
+            chest.position = CGPoint(x: state.x, y: state.y)
+        }
+
+        let powerUpStates = Dictionary(uniqueKeysWithValues: board.powerUps.map { ($0.id, $0) })
+        for powerUp in powerUps {
+            guard let state = powerUpStates[powerUp.multiplayerID] else { continue }
+            powerUp.position = CGPoint(x: state.x, y: state.y)
+        }
     }
 
     private func advanceClientPrediction(dt: TimeInterval) {
@@ -445,7 +501,7 @@ final class GameScene: SKScene {
             playerID: session.localPeerID,
             sequence: localInputSequence,
             movement: CGPointValue(currentMovementDirection()),
-            aimAngle: Double(playerNode.zRotation),
+            aimAngle: currentAimAngle(),
             wantsToAttack: true
         )
         latestLocalPlayerInput = input
@@ -456,6 +512,14 @@ final class GameScene: SKScene {
               let localPlayer = state.state.players.first(where: { $0.id == session.localPeerID }) else { return }
         playerNode.position = localPlayer.position.cgPoint
         playerNode.zRotation = CGFloat(localPlayer.rotation)
+    }
+
+    private func currentAimAngle() -> Double {
+        let direction = currentMovementDirection()
+        guard direction.dx != 0 || direction.dy != 0 else {
+            return Double(playerNode.zRotation)
+        }
+        return Double(atan2(direction.dy, direction.dx))
     }
 
     private func currentMovementDirection() -> CGVector {
@@ -489,7 +553,7 @@ final class GameScene: SKScene {
             playerID: session.localPeerID,
             sequence: driver.state.tick &+ 1,
             movement: CGPointValue(currentMovementDirection()),
-            aimAngle: Double(playerNode.zRotation),
+            aimAngle: currentAimAngle(),
             wantsToAttack: true
         )]
         if let multiplayerCoordinator {
@@ -509,6 +573,7 @@ final class GameScene: SKScene {
         let steps = driver.advance(elapsedTime: dt, inputs: inputs)
         authoritativeSimulationDriver = driver
         for step in steps {
+            renderSimulationAttackEvents(step.events, state: step.state)
             for event in step.events {
                 gameplayEventSequence &+= 1
                 multiplayerCoordinator?.broadcastGameplayEvent(
@@ -520,49 +585,14 @@ final class GameScene: SKScene {
         }
         guard let state = steps.last else { return }
         authoritativeGameState = state.state
-        applyAuthoritativeStateToScene(state.state, session: session)
-    }
-
-    private func applyAuthoritativeStateToScene(_ state: GameState, session: MultiplayerTransport) {
-        guard let localPlayerState = state.players.first(where: { $0.id == session.localPeerID }) else { return }
-        playerNode.position = localPlayerState.position.cgPoint
-        playerNode.zRotation = CGFloat(localPlayerState.rotation)
-        killCount = state.score
-        hudManager.updateKillCount(killCount)
-
-        let board = GameStateMultiplayerMapper.boardState(
-            from: state,
-            sequence: state.tick,
-            timestamp: 0,
-            hostID: session.localPeerID,
+        applyAuthoritativeStateToScene(
+            state.state,
+            localPlayerID: session.localPeerID,
             playerColors: knownPlayerStates.mapValues(\.color),
             sessionStartTimes: knownPlayerStates.mapValues(\.sessionStartedAt)
         )
-        if let localBoardState = board.players.first(where: { $0.id == session.localPeerID }) {
-            playerNode.apply(multiplayerState: localBoardState)
-            hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
-        }
-        reconcileZombies(board.zombies)
-        reconcileChests(board.chests)
-        reconcilePowerUps(board.powerUps)
-        reconcileProjectiles(board.projectiles)
-        for zombie in zombies {
-            if let state = board.zombies.first(where: { $0.id == zombie.multiplayerID }) {
-                zombie.position = CGPoint(x: state.x, y: state.y)
-            }
-        }
-        for chest in chests {
-            if let state = board.chests.first(where: { $0.id == chest.multiplayerID }) {
-                chest.position = CGPoint(x: state.x, y: state.y)
-            }
-        }
-        for powerUp in powerUps {
-            if let state = board.powerUps.first(where: { $0.id == powerUp.multiplayerID }) {
-                powerUp.position = CGPoint(x: state.x, y: state.y)
-            }
-        }
     }
-    
+
     // MARK: - Damage Handling
     func damageZombie(_ zombie: ZombieNode, amount: CGFloat) {
         guard !zombie.isDead else { return }
@@ -1000,7 +1030,9 @@ final class GameScene: SKScene {
         )
         let playerColors = knownPlayerStates.mapValues(\.color)
         let sessionStartTimes = knownPlayerStates.mapValues(\.sessionStartedAt)
-        let hostID = MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values)) ?? session.localPeerID
+        let hostID = isAuthoritativeMultiplayerHost
+            ? session.localPeerID
+            : MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values)) ?? session.localPeerID
         let board = GameStateMultiplayerMapper.boardState(
             from: state,
             sequence: multiplayerSnapshotSequence,
@@ -1210,7 +1242,6 @@ final class GameScene: SKScene {
             localID: session.localPeerID,
             remoteID: state.id
         )
-        multiplayerColor = localColor
         playerNode.apply(multiplayerColor: localColor)
         if shouldSpawnNearHost && localColor == .red && !hasSpawnedNearHost {
             playerNode.position = MultiplayerSpawnPlanner.position(
@@ -1233,12 +1264,48 @@ final class GameScene: SKScene {
             remotePlayer = newPlayer
         }
         setMultiplayerTarget(state.position, for: state.id, on: remotePlayer)
-        remotePlayer.apply(multiplayerColor: state.color)
+        remotePlayer.apply(multiplayerState: state)
+    }
+
+    private func addJoinedPlayerToAuthoritativeState(peerID: String) {
+        guard isAuthoritativeMultiplayerHost,
+              let session = multiplayerTransport,
+              session.localPeerID != peerID,
+              var driver = authoritativeSimulationDriver else { return }
+        guard !driver.state.players.contains(where: { $0.id == peerID }) else { return }
+
+        let spawnPosition = MultiplayerSpawnPlanner.position(
+            forPlayerIndex: driver.state.players.count,
+            hostPosition: playerNode.position
+        )
+        let state = GamePlayerState(
+            id: peerID,
+            position: CGPointValue(x: Double(spawnPosition.x), y: Double(spawnPosition.y)),
+            rotation: 0,
+            health: 100,
+            weapon: .pistol,
+            powerUps: []
+        )
+        var authoritativeState = driver.state
+        authoritativeState.players.append(state)
+        driver.replaceState(authoritativeState)
+        authoritativeSimulationDriver = driver
+        authoritativeGameState = authoritativeState
+
+        let playerState = MultiplayerPlayerState(
+            id: peerID,
+            position: spawnPosition,
+            color: MultiplayerSpawnPlanner.color(localID: session.localPeerID, remoteID: peerID),
+            sessionStartedAt: Date().timeIntervalSince1970
+        )
+        knownPlayerStates[peerID] = playerState
+        applyRemotePlayer(playerState, shouldSpawnNearHost: false)
     }
 }
 
 extension GameScene {
     fileprivate func handleMultiplayerMessage(_ message: MultiplayerWireMessage) {
+        print("[Multiplayer] scene handling message=\(message.logNameForDiagnostics)")
         switch message {
         case let .playerUpdate(state):
             knownPlayerStates[state.id] = state
@@ -1253,13 +1320,82 @@ extension GameScene {
         }
     }
 
+    private func renderSimulationAttackEvents(_ events: [GameplayEvent], state: GameState) {
+        for event in events {
+            switch event {
+            case let .projectileSpawned(id, ownerID):
+                guard !id.hasSuffix("-1"), !id.hasSuffix("-2"),
+                      let player = state.players.first(where: { $0.id == ownerID }) else { continue }
+                effectsRenderer.renderMuzzleFlash(
+                    weapon: player.weapon,
+                    at: player.position.cgPoint,
+                    angle: CGFloat(player.rotation),
+                    in: worldNode
+                )
+            case let .meleeAttack(_, ownerID):
+                guard let player = state.players.first(where: { $0.id == ownerID }) else { continue }
+                let slash = MeleeSlashNode(
+                    weapon: player.weapon,
+                    range: CGFloat(player.weapon.range),
+                    angle: CGFloat(player.rotation)
+                )
+                slash.position = player.position.cgPoint
+                slash.zPosition = 14
+                worldNode.addChild(slash)
+            default:
+                break
+            }
+        }
+    }
+
+    private func renderClientAttackEvent(_ event: GameplayEvent) {
+        let ownerID: String
+        switch event {
+        case let .projectileSpawned(id, owner):
+            guard !id.hasSuffix("-1"), !id.hasSuffix("-2") else { return }
+            ownerID = owner
+        case let .meleeAttack(_, owner):
+            ownerID = owner
+        default:
+            return
+        }
+
+        let player = ownerID == multiplayerTransport?.localPeerID
+            ? playerNode
+            : remotePlayers[ownerID]
+        guard let player else { return }
+
+        switch event {
+        case .projectileSpawned:
+            effectsRenderer.renderMuzzleFlash(
+                weapon: player.currentWeapon,
+                at: player.position,
+                angle: player.zRotation,
+                in: worldNode
+            )
+        case .meleeAttack:
+            let slash = MeleeSlashNode(
+                weapon: player.currentWeapon,
+                range: player.currentWeaponRange,
+                angle: player.zRotation
+            )
+            slash.position = player.position
+            slash.zPosition = 14
+            worldNode.addChild(slash)
+        default:
+            break
+        }
+    }
+
     private func applyGameplayEvent(_ event: GameplayEvent) {
         guard isMultiplayerClient else { return }
         switch event {
         case .matchEnded:
             triggerGameOver()
-        case .projectileSpawned, .meleeAttack, .zombieDamaged, .zombieKilled,
-             .chestOpened, .powerUpCollected, .playerDamaged, .playerEliminated:
+        case .projectileSpawned, .meleeAttack:
+            renderClientAttackEvent(event)
+        case .zombieDamaged, .zombieKilled, .chestOpened, .powerUpCollected,
+             .playerDamaged, .playerEliminated:
             // Entity and health changes are committed by the next authoritative snapshot.
             break
         }
