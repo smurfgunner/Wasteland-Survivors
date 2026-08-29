@@ -126,6 +126,24 @@ struct GameSceneIntegrationTests {
         #expect(scene.cameraNode.childNode(withName: "mainMenu")?.childNode(withName: "exitButton") != nil)
     }
 
+    @Test("Main menu buttons do not overlap")
+    func mainMenuButtonsDoNotOverlap() {
+        // Given a fully initialized main menu.
+        let scene = makeScene(started: false)
+        let menu = scene.cameraNode.childNode(withName: "mainMenu")
+        let buttons = menu?.children.filter { node in
+            ["startButton", "multiplayerButton", "exitButton"].contains(node.name ?? "")
+        } ?? []
+
+        // When the button frames are measured in their shared menu coordinate space.
+        // Then every pair has a visible gap and cannot intercept the same tap.
+        for (index, button) in buttons.enumerated() {
+            for otherButton in buttons.dropFirst(index + 1) {
+                #expect(!button.frame.intersects(otherButton.frame))
+            }
+        }
+    }
+
     @Test("Starting from the main menu enables gameplay")
     func startingFromMainMenuEnablesGameplay() {
         // Given a newly presented game scene.
@@ -147,7 +165,7 @@ struct GameSceneIntegrationTests {
         scene.onExitRequested = { didRequestExit = true }
 
         // When the exit button is selected.
-        scene.handleMenuInput(at: CGPoint(x: 0, y: -80))
+        scene.handleMenuInput(at: CGPoint(x: 0, y: -140))
 
         // Then the host is notified.
         #expect(didRequestExit)

@@ -38,6 +38,13 @@
 			);
 			target = 45657B9F3040E89F0035E459 /* Wasteland Survivors tvOS */;
 		};
+		45D06C72304257070094FFA6 /* Exceptions for "Wasteland Survivors macOS" folder in "Wasteland Survivors macOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"Wasteland-Survivors-macOS-Info.plist",
+			);
+			target = 45657BAF3040E89F0035E459 /* Wasteland Survivors macOS */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -64,6 +71,9 @@
 		};
 		45657BB13040E89F0035E459 /* Wasteland Survivors macOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				45D06C72304257070094FFA6 /* Exceptions for "Wasteland Survivors macOS" folder in "Wasteland Survivors macOS" target */,
+			);
 			path = "Wasteland Survivors macOS";
 			sourceTree = "<group>";
 		};
@@ -317,6 +327,7 @@
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Wasteland Survivors iOS/Info.plist";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
@@ -357,6 +368,7 @@
 				DEVELOPMENT_TEAM = A5EKHJ2X2S;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Wasteland Survivors iOS/Info.plist";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
@@ -397,6 +409,7 @@
 				DEVELOPMENT_TEAM = A5EKHJ2X2S;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Wasteland Survivors tvOS/Info.plist";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
@@ -429,6 +442,7 @@
 				DEVELOPMENT_TEAM = A5EKHJ2X2S;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Wasteland Survivors tvOS/Info.plist";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
@@ -463,9 +477,21 @@
 				DEVELOPMENT_TEAM = A5EKHJ2X2S;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Wasteland-Survivors-macOS-Info.plist";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_NSMainStoryboardFile = Main;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -498,9 +524,21 @@
 				DEVELOPMENT_TEAM = A5EKHJ2X2S;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Wasteland-Survivors-macOS-Info.plist";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wasteland Survivors uses your local network to find and connect nearby players.";
 				INFOPLIST_KEY_NSMainStoryboardFile = Main;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (

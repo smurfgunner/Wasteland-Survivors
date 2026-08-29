@@ -38,11 +38,23 @@ final class GameScene: SKScene {
     private let selectWeaponRewardUseCase: SelectWeaponRewardUseCase
     private let selectPowerUpDropUseCase: SelectPowerUpDropUseCase
     private let effectsRenderer: GameEffectsRenderer
+    private let multiplayerSessionFactory: () -> LocalMultiplayerNetworkSession?
     
     private(set) var playerNode: PlayerNode!
     private(set) var zombies: [ZombieNode] = []
     private(set) var chests: [ChestNode] = []
     private(set) var powerUps: [PowerUpNode] = []
+    private(set) var remotePlayers: [String: PlayerNode] = [:]
+    private var localMultiplayerSession: LocalMultiplayerNetworkSession?
+    private var multiplayerColor: MultiplayerPlayerColor = .blue
+    private var lastMultiplayerSyncTime: TimeInterval = 0
+    private var hasSpawnedNearHost = false
+    private var knownPlayerStates: [String: MultiplayerPlayerState] = [:]
+    private var hostID: String?
+    private var isMultiplayerClient: Bool {
+        guard localMultiplayerSession != nil else { return false }
+        return hostID != nil && hostID != localMultiplayerSession?.localPlayerID
+    }
     
     // MARK: - State & Controls
     var isGameOver: Bool = false
@@ -72,10 +84,18 @@ final class GameScene: SKScene {
     init(
         size: CGSize,
         randomSource: RandomSource = SystemRandomSource(),
-        clock: @escaping (TimeInterval) -> TimeInterval = { $0 }
+        clock: @escaping (TimeInterval) -> TimeInterval = { $0 },
+        multiplayerSessionFactory: @escaping () -> LocalMultiplayerNetworkSession? = {
+            #if canImport(MultipeerConnectivity)
+            return MultipeerConnectivitySession()
+            #else
+            return nil
+            #endif
+        }
     ) {
         self.randomSource = randomSource
         self.clock = clock
+        self.multiplayerSessionFactory = multiplayerSessionFactory
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
         selectPowerUpDropUseCase = SelectPowerUpDropUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
@@ -86,6 +106,13 @@ final class GameScene: SKScene {
         let randomSource = SystemRandomSource()
         self.randomSource = randomSource
         self.clock = { $0 }
+        self.multiplayerSessionFactory = {
+            #if canImport(MultipeerConnectivity)
+            return MultipeerConnectivitySession()
+            #else
+            return nil
+            #endif
+        }
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
         selectPowerUpDropUseCase = SelectPowerUpDropUseCase(randomSource: randomSource)
         effectsRenderer = GameEffectsRenderer(randomSource: randomSource)
@@ -96,10 +123,17 @@ final class GameScene: SKScene {
     static func newGameScene(
         size: CGSize,
         randomSource: RandomSource = SystemRandomSource(),
-        clock: @escaping (TimeInterval) -> TimeInterval = { $0 }
+        clock: @escaping (TimeInterval) -> TimeInterval = { $0 },
+        multiplayerSessionFactory: @escaping () -> LocalMultiplayerNetworkSession? = {
+            #if canImport(MultipeerConnectivity)
+            return MultipeerConnectivitySession()
+            #else
+            return nil
+            #endif
+        }
     ) -> GameScene {
         let sceneSize = size.width > 0 && size.height > 0 ? size : CGSize(width: 1024, height: 768)
-        let scene = GameScene(size: sceneSize, randomSource: randomSource, clock: clock)
+        let scene = GameScene(size: sceneSize, randomSource: randomSource, clock: clock, multiplayerSessionFactory: multiplayerSessionFactory)
         scene.scaleMode = .resizeFill
         return scene
     }
@@ -162,6 +196,12 @@ final class GameScene: SKScene {
         playerNode.zPosition = 10
         worldNode.addChild(playerNode)
         hudManager.updateWeapon(weapon: playerNode.currentWeapon)
+    }
+
+    private func setupLocalMultiplayer() {
+        guard let session = multiplayerSessionFactory() else { return }
+        session.delegate = self
+        localMultiplayerSession = session
     }
     
     private func setupWastelandTerrain() {
@@ -258,19 +298,29 @@ final class GameScene: SKScene {
             hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
         }
         
-        // 3. Zombies AI
-        updateZombies(dt: dt, currentTime: currentTime)
+        if isMultiplayerClient {
+            syncLocalPlayerIfNeeded(at: gameTime)
+            cameraNode.position = playerNode.position
+            return
+        }
+
+        // 3. Zombies AI and board simulation run only on the elected host.
+        updateZombies(dt: dt, currentTime: gameTime)
+        syncLocalPlayerIfNeeded(at: gameTime)
         
         // 4. Auto-Combat
-        combatSystem.updateAutoCombat(
-            player: playerNode,
-            zombies: zombies,
-            world: worldNode,
-            currentTime: gameTime,
-            onDamageZombie: { [weak self] zombie, damage in
-                self?.damageZombie(zombie, amount: damage)
-            }
-        )
+        guard let localPlayer = playerNode else { return }
+        for player in [localPlayer] + Array(remotePlayers.values) {
+            combatSystem.updateAutoCombat(
+                player: player,
+                zombies: zombies,
+                world: worldNode,
+                currentTime: gameTime,
+                onDamageZombie: { [weak self] zombie, damage in
+                    self?.damageZombie(zombie, amount: damage)
+                }
+            )
+        }
         
         // 5. Spawners
         handleSpawning(currentTime: gameTime)
@@ -302,13 +352,15 @@ final class GameScene: SKScene {
     }
     
     private func updateZombies(dt: TimeInterval, currentTime: TimeInterval) {
+        guard let localPlayer = playerNode else { return }
+        let players = [localPlayer] + Array(remotePlayers.values)
         updateEnemyBehaviorUseCase.execute(
             zombies: zombies,
-            playerPosition: playerNode.position,
+            players: players,
             deltaTime: dt,
             currentTime: currentTime,
-            onPlayerDamage: { [weak self] amount in
-                self?.playerTakeDamage(amount: amount)
+            onPlayerDamage: { [weak self] player, amount in
+                self?.playerTakeDamage(amount: amount, player: player)
             }
         )
     }
@@ -367,15 +419,18 @@ final class GameScene: SKScene {
         hudManager.showNotification(text: "POWERUP: \(powerUp.powerUp.title)")
     }
     
-    private func playerTakeDamage(amount: CGFloat) {
+    private func playerTakeDamage(amount: CGFloat, player: PlayerNode? = nil) {
         guard !isGameOver else { return }
         
-        playerNode.takeDamage(amount: amount)
-        hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        let target = player ?? playerNode
+        target?.takeDamage(amount: amount)
+        if target === playerNode {
+            hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        }
         
         effectsRenderer.renderPlayerDamage(in: cameraNode, sceneSize: size)
         
-        if playerNode.currentHealth <= 0 {
+        if target?.currentHealth == 0, target === playerNode {
             triggerGameOver()
         }
     }
@@ -402,8 +457,9 @@ final class GameScene: SKScene {
         let menuNode = makeMenuNode(named: "mainMenu", title: "WASTELAND SURVIVORS")
         selectedMenuButtonName = "startButton"
         addMenuButton(named: "startButton", title: "START GAME", position: CGPoint(x: 0, y: 0), to: menuNode)
+        addMenuButton(named: "multiplayerButton", title: "LOCAL MULTIPLAYER", position: CGPoint(x: 0, y: -70), to: menuNode)
         #if os(macOS)
-        addMenuButton(named: "exitButton", title: "EXIT", position: CGPoint(x: 0, y: -80), to: menuNode)
+        addMenuButton(named: "exitButton", title: "EXIT", position: CGPoint(x: 0, y: -140), to: menuNode)
         #endif
         updateMenuHighlight(in: menuNode)
     }
@@ -498,12 +554,31 @@ final class GameScene: SKScene {
     func handleMenuInput(at location: CGPoint) {
         let menuName = menuState == .paused ? "pauseMenu" : "mainMenu"
         guard menuState != .playing,
-              let menuNode = cameraNode.childNode(withName: menuName),
-              let node = menuNode.atPoint(location).name else { return }
+              let menuNode = cameraNode.childNode(withName: menuName) else { return }
 
-        switch node {
+        let menuLocation = menuNode.convert(location, from: cameraNode)
+        let buttonNames = ["startButton", "multiplayerButton", "exitButton", "resumeButton", "exitToMenuButton"]
+        let buttonName = menuNode.nodes(at: menuLocation)
+            .reversed()
+            .compactMap { node -> String? in
+                var currentNode: SKNode? = node
+                while let candidate = currentNode {
+                    if let name = candidate.name, buttonNames.contains(name) {
+                        return name
+                    }
+                    currentNode = candidate.parent
+                }
+                return nil
+            }
+            .first
+
+        guard let buttonName else { return }
+
+        switch buttonName {
         case "startButton":
             startGame()
+        case "multiplayerButton":
+            startLocalMultiplayer()
         case "exitButton":
             onExitRequested?()
         case "resumeButton":
@@ -520,7 +595,7 @@ final class GameScene: SKScene {
         switch menuState {
         case .main:
             #if os(macOS)
-            names = ["startButton", "exitButton"]
+            names = ["startButton", "multiplayerButton", "exitButton"]
             #else
             names = ["startButton"]
             #endif
@@ -548,6 +623,8 @@ final class GameScene: SKScene {
         switch selectedMenuButtonName {
         case "startButton":
             startGame()
+        case "multiplayerButton":
+            startLocalMultiplayer()
         case "exitButton":
             onExitRequested?()
         case "resumeButton":
@@ -589,6 +666,167 @@ final class GameScene: SKScene {
         menuState = .playing
         
         spawnInitialChests()
+    }
+
+    func startLocalMultiplayer() {
+        multiplayerColor = .blue
+        hasSpawnedNearHost = false
+        playerNode.apply(multiplayerColor: multiplayerColor)
+        knownPlayerStates.removeAll()
+        if let session = localMultiplayerSession {
+            hostID = session.localPlayerID
+        }
+        if localMultiplayerSession == nil {
+            setupLocalMultiplayer()
+        }
+        localMultiplayerSession?.start()
+        startGame()
+    }
+
+    private func syncLocalPlayerIfNeeded(at currentTime: TimeInterval) {
+        guard currentTime - lastMultiplayerSyncTime >= 0.1,
+              let session = localMultiplayerSession else { return }
+        lastMultiplayerSyncTime = currentTime
+        let state = MultiplayerPlayerState(
+            id: session.localPlayerID,
+            position: playerNode.position,
+            color: multiplayerColor,
+            health: playerNode.currentHealth,
+            weapon: playerNode.currentWeapon,
+            powerUps: playerNode.appliedPowerUpTypes,
+            rotation: playerNode.zRotation
+        )
+        knownPlayerStates[state.id] = state
+        hostID = ([session.localPlayerID] + Array(knownPlayerStates.keys)).min()
+        if !isMultiplayerClient { sendBoardSnapshot(using: session) }
+        guard let data = try? MultiplayerWireMessage.playerUpdate(state).encoded() else { return }
+        session.send(data)
+    }
+
+    private func sendBoardSnapshot(using session: LocalMultiplayerNetworkSession) {
+        let board = MultiplayerBoardState(
+            hostID: session.localPlayerID,
+            players: knownPlayerStates.values.sorted { $0.id < $1.id },
+            zombies: zombies.enumerated().map { index, zombie in
+                MultiplayerZombieState(id: "zombie-\(index)", x: Double(zombie.position.x), y: Double(zombie.position.y), health: Double(zombie.health), rotation: Double(zombie.zRotation))
+            },
+            chests: chests.enumerated().map { index, chest in
+                MultiplayerChestState(id: "chest-\(index)", x: Double(chest.position.x), y: Double(chest.position.y))
+            },
+            powerUps: powerUps.enumerated().map { index, powerUp in
+                MultiplayerPowerUpState(id: "powerup-\(index)", x: Double(powerUp.position.x), y: Double(powerUp.position.y), type: powerUp.powerUp)
+            },
+            projectiles: worldNode.children.compactMap { $0 as? ProjectileNode }.enumerated().map { index, projectile in
+                MultiplayerProjectileState(id: "projectile-\(index)", x: Double(projectile.position.x), y: Double(projectile.position.y), angle: Double(projectile.zRotation), weapon: projectile.weapon, damage: Double(projectile.damage))
+            },
+            killCount: killCount
+        )
+        guard let data = try? MultiplayerWireMessage.boardSnapshot(board).encoded() else { return }
+        session.send(data)
+    }
+
+    private func applyBoardSnapshot(_ board: MultiplayerBoardState) {
+        hostID = board.hostID
+        guard isMultiplayerClient else { return }
+        killCount = board.killCount
+        hudManager.updateKillCount(killCount)
+
+        for state in board.players {
+            if state.id == localMultiplayerSession?.localPlayerID {
+                playerNode.position = state.position
+                playerNode.apply(multiplayerState: state)
+                hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+                hudManager.updateWeapon(
+                    weapon: playerNode.currentWeapon,
+                    damage: playerNode.currentWeaponDamage,
+                    range: playerNode.currentWeaponRange,
+                    fireRate: playerNode.currentWeaponFireRate
+                )
+            } else {
+                applyRemotePlayer(state, shouldSpawnNearHost: false)
+            }
+        }
+
+        zombies.forEach { $0.removeFromParent() }
+        zombies = board.zombies.map { state in
+            let zombie = ZombieNode()
+            zombie.position = CGPoint(x: state.x, y: state.y)
+            zombie.zRotation = CGFloat(state.rotation)
+            zombie.takeDamage(amount: CGFloat(60 - state.health))
+            worldNode.addChild(zombie)
+            return zombie
+        }
+        chests.forEach { $0.removeFromParent() }
+        chests = board.chests.map { state in
+            let chest = ChestNode()
+            chest.position = CGPoint(x: state.x, y: state.y)
+            worldNode.addChild(chest)
+            return chest
+        }
+        powerUps.forEach { $0.removeFromParent() }
+        powerUps = board.powerUps.map { state in
+            let powerUp = PowerUpNode(powerUp: state.type)
+            powerUp.position = CGPoint(x: state.x, y: state.y)
+            worldNode.addChild(powerUp)
+            return powerUp
+        }
+
+        worldNode.children.compactMap { $0 as? ProjectileNode }.forEach { $0.removeFromParent() }
+        for state in board.projectiles {
+            let projectile = ProjectileNode(weapon: state.weapon, damage: CGFloat(state.damage), directionAngle: CGFloat(state.angle))
+            projectile.position = CGPoint(x: state.x, y: state.y)
+            worldNode.addChild(projectile)
+        }
+    }
+
+    private func applyRemotePlayer(_ state: MultiplayerPlayerState, shouldSpawnNearHost: Bool = true) {
+        guard let session = localMultiplayerSession, state.id != session.localPlayerID else { return }
+
+        let localColor = MultiplayerSpawnPlanner.color(
+            localID: session.localPlayerID,
+            remoteID: state.id
+        )
+        multiplayerColor = localColor
+        playerNode.apply(multiplayerColor: localColor)
+        if shouldSpawnNearHost && localColor == .red && !hasSpawnedNearHost {
+            playerNode.position = MultiplayerSpawnPlanner.position(
+                forPlayerIndex: 1,
+                hostPosition: state.position
+            )
+            hasSpawnedNearHost = true
+        }
+
+        let remotePlayer: PlayerNode
+        if let existing = remotePlayers[state.id] {
+            remotePlayer = existing
+        } else {
+            let newPlayer = PlayerNode()
+            newPlayer.apply(multiplayerColor: state.color)
+            newPlayer.position = state.position
+            newPlayer.zPosition = 10
+            worldNode.addChild(newPlayer)
+            remotePlayers[state.id] = newPlayer
+            remotePlayer = newPlayer
+        }
+        remotePlayer.position = state.position
+        remotePlayer.apply(multiplayerColor: state.color)
+    }
+}
+
+extension GameScene: LocalMultiplayerNetworkSessionDelegate {
+    func networkSession(_ session: LocalMultiplayerNetworkSession, didReceive data: Data) {
+        let applyMessage = { [weak self] in
+            guard let message = try? MultiplayerWireMessage.decode(data) else { return }
+            if case let .playerUpdate(state) = message {
+                self?.knownPlayerStates[state.id] = state
+                self?.hostID = [session.localPlayerID, state.id].min()
+                self?.applyRemotePlayer(state)
+            } else if case let .boardSnapshot(board) = message {
+                self?.applyBoardSnapshot(board)
+            }
+        }
+
+        DispatchQueue.main.async(execute: applyMessage)
     }
 }
 

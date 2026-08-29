@@ -1,6 +1,6 @@
 import SpriteKit
 
-enum WeaponType: String, CaseIterable {
+enum WeaponType: String, CaseIterable, Codable, Sendable {
     case pistol = "Pistol"
     case shotgun = "Shotgun"
     case rifle = "Assault Rifle"
