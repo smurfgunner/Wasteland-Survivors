@@ -161,12 +161,6 @@ extension DefaultAppleMultipeerConnectivityAdapter: MCSessionDelegate {
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         guard self.session === session else { return }
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in
-                self?.session(session, didReceive: data, fromPeer: peerID)
-            }
-            return
-        }
         guard !isDisconnecting else { return }
         delegate?.appleAdapter(self, didReceive: data, from: peerID.displayName)
     }

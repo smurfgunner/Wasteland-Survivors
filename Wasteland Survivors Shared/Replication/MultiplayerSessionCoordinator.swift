@@ -135,6 +135,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
                 movement: input.movement,
                 aimAngle: input.aimAngle,
                 wantsToAttack: input.wantsToAttack,
+                attackTargetID: input.attackTargetID,
                 wantsToOpenChestID: nil,
                 wantsToCollectPowerUpID: nil
             )
@@ -205,10 +206,14 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         }
     }
 
-    func transport(_ transport: MultiplayerTransport, didReceive data: Data, from peerID: String) {
+    func transport(_ transportService: MultiplayerTransport, didReceive data: Data, from peerID: String) {
         guard let message = try? MultiplayerWireMessage.decode(data) else {
             return
         }
+        self.transport(transportService, didReceive: message, from: peerID)
+    }
+
+    func transport(_ transportService: MultiplayerTransport, didReceive message: MultiplayerWireMessage, from peerID: String) {
         guard senderMatches(message, peerID: peerID) else {
             return
         }
@@ -257,6 +262,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         case let .joinAccepted(accepted): return accepted.hostID == peerID
         case let .playerUpdate(state): return state.id == peerID
         case let .boardSnapshot(board): return board.hostID == peerID
+        case let .compactSnapshot(snapshot): return snapshot.hostID == peerID
         case let .playerInput(input): return input.playerID == peerID
         case let .gameplayEvent(event): return event.hostID == peerID
         }
@@ -270,7 +276,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         case let .joinRequest(request): handle(request)
         case let .joinAccepted(accepted): handle(accepted)
         case let .playerInput(input): handle(input)
-        case .playerUpdate, .boardSnapshot: return true
+        case .playerUpdate, .boardSnapshot, .compactSnapshot: return true
         case let .gameplayEvent(event):
             guard appliedEvents.insertIfNew(
                 event.event,

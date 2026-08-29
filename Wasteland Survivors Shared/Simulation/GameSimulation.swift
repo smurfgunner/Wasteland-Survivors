@@ -91,6 +91,7 @@ struct PlayerInput: Codable, Equatable, Sendable {
     let movement: CGPointValue
     let aimAngle: Double
     let wantsToAttack: Bool
+    let attackTargetID: String?
     let wantsToOpenChestID: String?
     let wantsToCollectPowerUpID: String?
 
@@ -100,6 +101,7 @@ struct PlayerInput: Codable, Equatable, Sendable {
         movement: CGPointValue,
         aimAngle: Double = 0,
         wantsToAttack: Bool = false,
+        attackTargetID: String? = nil,
         wantsToOpenChestID: String? = nil,
         wantsToCollectPowerUpID: String? = nil
     ) {
@@ -109,6 +111,7 @@ struct PlayerInput: Codable, Equatable, Sendable {
         self.movement = movement
         self.aimAngle = aimAngle
         self.wantsToAttack = wantsToAttack
+        self.attackTargetID = attackTargetID
         self.wantsToOpenChestID = wantsToOpenChestID
         self.wantsToCollectPowerUpID = wantsToCollectPowerUpID
     }
@@ -311,13 +314,21 @@ struct GameSimulation {
             )
 
             let playerPosition = next.players[index].position
-            let attackTargetIndex = nearestLivingZombie(to: playerPosition, in: next.zombies)
-                .flatMap { zombieIndex in
-                    let attackRange = configuration.attackRange(for: next.players[index])
-                    return playerPosition.distance(to: next.zombies[zombieIndex].position) <= attackRange
-                        ? zombieIndex
-                        : nil
+            let attackRange = configuration.attackRange(for: next.players[index])
+            let attackTargetIndex = input.attackTargetID
+                .flatMap { targetID in
+                    next.zombies.firstIndex {
+                        $0.id == targetID &&
+                        $0.health > 0 &&
+                        playerPosition.distance(to: $0.position) <= attackRange
+                    }
                 }
+                ?? nearestLivingZombie(to: playerPosition, in: next.zombies)
+                    .flatMap { zombieIndex in
+                        playerPosition.distance(to: next.zombies[zombieIndex].position) <= attackRange
+                            ? zombieIndex
+                            : nil
+                    }
             if let attackTargetIndex {
                 let target = next.zombies[attackTargetIndex]
                 next.players[index].rotation = atan2(
@@ -406,7 +417,8 @@ struct GameSimulation {
         )
 
         for index in next.zombies.indices {
-            guard let target = NPCDecisionSystem.target(
+            guard next.zombies[index].health > 0,
+                  let target = NPCDecisionSystem.target(
                 for: next.zombies[index],
                 players: next.players
             ) else { continue }

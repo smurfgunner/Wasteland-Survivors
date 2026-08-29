@@ -47,6 +47,20 @@ struct MultiplayerDeliveryPolicyTests {
         ) == CGPoint(x: 3, y: 0))
     }
 
+    @Test("Authoritative snapshots use a 30 Hz host cadence")
+    func authoritativeSnapshotsUseThirtyHertzCadence() {
+        #expect(MultiplayerSnapshotTiming.hostSnapshotInterval == 1.0 / 30.0)
+    }
+
+    @Test("Interpolation delay spans two authoritative snapshots")
+    func interpolationDelaySpansTwoAuthoritativeSnapshots() {
+        #expect(
+            MultiplayerSnapshotTiming.interpolationDelayTicks(
+                snapshotIntervalTicks: 6
+            ) == 12
+        )
+    }
+
     @Test("Session lifecycle messages are reliable")
     func lifecycleMessagesAreReliable() {
         let hello = MultiplayerHello(sessionID: "session", peerID: "peer", startedAt: 1, protocolVersion: 1)

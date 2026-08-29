@@ -197,4 +197,57 @@ struct SimulationRegressionTests {
         // Then the complete shotgun spread is represented in simulation state.
         #expect(step.state.projectiles.count == 3)
     }
+
+    @Test("Simulation honors an explicit attack target over nearest-target auto-aim")
+    func simulationHonorsExplicitAttackTargetOverNearestTargetAutoAim() {
+        let state = GameState(
+            seed: 1,
+            tick: 0,
+            players: [
+                GamePlayerState(
+                    id: "player",
+                    position: .zero,
+                    rotation: 0,
+                    health: 100,
+                    weapon: .pistol,
+                    powerUps: []
+                )
+            ],
+            zombies: [
+                GameZombieState(
+                    id: "nearest",
+                    position: CGPointValue(x: 0, y: 100),
+                    rotation: 0,
+                    health: 60
+                ),
+                GameZombieState(
+                    id: "selected",
+                    position: CGPointValue(x: 100, y: 0),
+                    rotation: 0,
+                    health: 60
+                )
+            ],
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            score: 0,
+            isGameOver: false
+        )
+
+        let step = GameSimulation().advance(
+            state,
+            inputs: [PlayerInput(
+                playerID: "player",
+                sequence: 1,
+                movement: .zero,
+                aimAngle: 0,
+                wantsToAttack: true,
+                attackTargetID: "selected"
+            )],
+            tick: 1
+        )
+
+        #expect(step.state.players[0].rotation == 0)
+        #expect(step.state.projectiles.first?.angle == 0)
+    }
 }

@@ -17,10 +17,16 @@ protocol MultiplayerTransportDelegate: AnyObject {
     func transport(_ transport: MultiplayerTransport, didChange state: MultiplayerTransportState)
     func transport(_ transport: MultiplayerTransport, didChangePeer peerID: String, state: MultiplayerPeerState)
     func transport(_ transport: MultiplayerTransport, didReceive data: Data, from peerID: String)
+    func transport(_ transport: MultiplayerTransport, didReceive message: MultiplayerWireMessage, from peerID: String)
 }
 
 extension MultiplayerTransportDelegate {
     func transport(_ transport: MultiplayerTransport, didChangePeer peerID: String, state: MultiplayerPeerState) {}
+
+    func transport(_ transportService: MultiplayerTransport, didReceive message: MultiplayerWireMessage, from peerID: String) {
+        guard let data = try? message.encoded() else { return }
+        transportService.delegate?.transport(transportService, didReceive: data, from: peerID)
+    }
 }
 
 protocol MultiplayerTransport: AnyObject {

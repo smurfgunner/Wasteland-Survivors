@@ -225,3 +225,11 @@ struct LocalPredictionInputHistory {
         }
     }
 }
+
+enum MultiplayerSnapshotTiming {
+    static let hostSnapshotInterval: TimeInterval = 1.0 / 30.0
+
+    static func interpolationDelayTicks(snapshotIntervalTicks: UInt64) -> UInt64 {
+        min(12, max(2, snapshotIntervalTicks * 2))
+    }
+}

@@ -18,6 +18,7 @@ enum PlayerDamageSystem {
 
         for zombieIndex in zombieIndices {
             let zombie = state.zombies[zombieIndex]
+            guard zombie.health > 0 else { continue }
             for playerIndex in playerIndices {
                 guard state.players[playerIndex].health > 0,
                       zombie.position.distance(to: state.players[playerIndex].position) <= contactRadius else {
@@ -25,8 +26,10 @@ enum PlayerDamageSystem {
                 }
 
                 let playerID = state.players[playerIndex].id
-                guard state.lastDamageTickByPlayer[playerID]
+                let cooldownKey = "\(playerID)::\(zombie.id)"
+                guard state.lastDamageTickByPlayer[cooldownKey]
                     .map({ tick >= $0 + cooldownTicks }) ?? true else { continue }
+                state.lastDamageTickByPlayer[cooldownKey] = tick
                 state.lastDamageTickByPlayer[playerID] = tick
                 state.players[playerIndex].health = max(
                     0,

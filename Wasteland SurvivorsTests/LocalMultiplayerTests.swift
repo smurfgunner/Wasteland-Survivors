@@ -53,6 +53,7 @@ private final class FakeMultiplayerSession: MultiplayerTransport {
         case let .joinAccepted(value): senderID = value.hostID
         case let .playerUpdate(value): senderID = value.id
         case let .boardSnapshot(value): senderID = value.hostID
+        case let .compactSnapshot(value): senderID = value.hostID
         case let .playerInput(value): senderID = value.playerID
         case let .gameplayEvent(value): senderID = value.hostID
         }
@@ -1321,5 +1322,45 @@ struct LocalMultiplayerTests {
 
         #expect(session.state == .connecting)
         #expect(session.connectedPeerIDs.isEmpty)
+    }
+
+    @Test("Compact snapshots contain only correction state and target overrides")
+    func compactSnapshotsExcludePredictableWorldEntities() throws {
+        let snapshot = MultiplayerCompactSnapshot(
+            sequence: 1,
+            simulationTick: 30,
+            seed: 42,
+            hostID: "host",
+            players: [
+                MultiplayerCompactPlayerState(
+                    id: "player",
+                    x: 10,
+                    y: 20,
+                    rotation: 1.5,
+                    health: 100,
+                    attackTargetID: "zombie-1"
+                )
+            ],
+            zombieTargetOverrides: [
+                MultiplayerZombieTargetOverride(
+                    zombieID: "zombie-1",
+                    targetPlayerID: "player",
+                    effectiveTick: 30
+                )
+            ],
+            acknowledgedInputSequences: ["player": 29]
+        )
+
+        let data = try MultiplayerWireMessage.compactSnapshot(snapshot).encoded()
+        let payload = try #require(String(data: data, encoding: .utf8))
+        let decoded = try MultiplayerWireMessage.decode(data)
+
+        #expect(decoded == .compactSnapshot(snapshot))
+        #expect(!payload.contains("zombies"))
+        #expect(!payload.contains("chests"))
+        #expect(!payload.contains("powerUps"))
+        #expect(!payload.contains("projectiles"))
+        #expect(payload.contains("attackTargetID"))
+        #expect(payload.contains("zombieTargetOverrides"))
     }
 }

@@ -989,7 +989,7 @@ final class GameScene: SKScene {
     }
 
     private func syncLocalPlayerIfNeeded(at currentTime: TimeInterval) {
-        let syncInterval = isMultiplayerClient ? (1.0 / 30.0) : 0.1
+        let syncInterval = isMultiplayerClient ? (1.0 / 30.0) : MultiplayerSnapshotTiming.hostSnapshotInterval
         if isMultiplayerClient {
             guard let latestInput = latestLocalPlayerInput,
                   latestInput.sequence == 1
@@ -1023,6 +1023,7 @@ final class GameScene: SKScene {
                 movement: CGVector(dx: input.movement.x, dy: input.movement.y),
                 aimAngle: input.aimAngle,
                 wantsToAttack: input.wantsToAttack,
+                attackTargetID: input.attackTargetID,
                 wantsToOpenChestID: pendingChestInteractionID ?? input.wantsToOpenChestID,
                 wantsToCollectPowerUpID: pendingPowerUpInteractionID ?? input.wantsToCollectPowerUpID
             )
@@ -1155,7 +1156,17 @@ final class GameScene: SKScene {
         if isMultiplayerClient {
             multiplayerRenderTick += max(0, dt * 60)
             let renderTick = UInt64(max(0, multiplayerRenderTick.rounded(.down)))
-            let delayTicks: UInt64 = 2
+            let snapshotIntervalTicks: UInt64 = {
+                let ticks = receivedSnapshotBuffer.snapshots.suffix(2).map { $0.simulationTick }
+                guard ticks.count == 2 else { return 2 }
+                return max(1, ticks[1] - ticks[0])
+            }()
+            let delayTicks = min(
+                6,
+                MultiplayerSnapshotTiming.interpolationDelayTicks(
+                    snapshotIntervalTicks: snapshotIntervalTicks
+                )
+            )
             let maxExtrapolationTicks: UInt64 = 3
             for (id, player) in remotePlayers {
                 if let sampled = receivedSnapshotBuffer.position(
@@ -1168,7 +1179,7 @@ final class GameScene: SKScene {
                     player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 10)
                 }
             }
-            for node in zombies + chests + powerUps {
+            for node in zombies.filter({ !$0.isDead }) + chests + powerUps {
                 guard let id = node.name,
                       let sampled = receivedSnapshotBuffer.position(
                           for: id,
@@ -1189,7 +1200,7 @@ final class GameScene: SKScene {
             guard let target = multiplayerTargetPositions[id] else { continue }
             player.position = MultiplayerInterpolation.position(current: player.position, target: target, deltaTime: dt, responsiveness: 14)
         }
-        for node in zombies + chests + powerUps {
+        for node in zombies.filter({ !$0.isDead }) + chests + powerUps {
             guard let id = node.name, let target = multiplayerTargetPositions[id] else { continue }
             node.position = MultiplayerInterpolation.position(current: node.position, target: target, deltaTime: dt, responsiveness: 10)
         }
@@ -1271,7 +1282,10 @@ final class GameScene: SKScene {
                 worldNode.addChild(zombie)
                 return zombie
             },
-            update: { [weak self] zombie, state in
+            update: { [weak self, worldNode] zombie, state in
+                if state.health > 0, zombie.parent == nil {
+                    worldNode.addChild(zombie)
+                }
                 self?.setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: zombie)
                 zombie.zRotation = CGFloat(state.rotation)
                 zombie.apply(multiplayerHealth: CGFloat(state.health))

@@ -239,6 +239,38 @@ struct MultiplayerSessionCoordinatorTests {
         }.isEmpty)
     }
 
+    @Test("Decoded transport messages reach the coordinator without a second decode")
+    @MainActor
+    func decodedTransportMessagesReachCoordinatorDirectly() throws {
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
+        )).encoded())
+
+        var received = false
+        coordinator.onMessage = { message in
+            if case .playerUpdate = message {
+                received = true
+            }
+        }
+
+        coordinator.transport(
+            session,
+            didReceive: MultiplayerWireMessage.playerUpdate(
+                MultiplayerPlayerState(id: "host", position: .zero, color: .blue)
+            ),
+            from: "host"
+        )
+
+        #expect(received)
+    }
+
     @Test("A client sends owned intent to the elected host")
     @MainActor
     func clientSendsOwnedIntentToHost() throws {
@@ -1216,6 +1248,7 @@ private final class CoordinatorTestSession: MultiplayerTransport {
         case let .joinAccepted(value): return value.hostID
         case let .playerUpdate(value): return value.id
         case let .boardSnapshot(value): return value.hostID
+        case let .compactSnapshot(value): return value.hostID
         case let .playerInput(value): return value.playerID
         case let .gameplayEvent(value): return value.hostID
         }

@@ -226,7 +226,7 @@ struct MultiplayerBoardState: Codable, Equatable, Sendable {
 extension MultiplayerWireMessage {
     var deliveryPolicy: MultiplayerDeliveryPolicy {
         switch self {
-        case .playerUpdate, .boardSnapshot, .playerInput:
+        case .playerUpdate, .boardSnapshot, .compactSnapshot, .playerInput:
             return .replaceable
         case .gameplayEvent, .hello, .hostAnnouncement, .joinRequest, .joinAccepted:
             return .reliable
@@ -241,6 +241,7 @@ struct MultiplayerPlayerInput: Codable, Equatable, Sendable {
     let movementY: Double
     let aimAngle: Double
     let wantsToAttack: Bool
+    let attackTargetID: String?
     let wantsToOpenChestID: String?
     let wantsToCollectPowerUpID: String?
 
@@ -250,6 +251,7 @@ struct MultiplayerPlayerInput: Codable, Equatable, Sendable {
         movement: CGVector,
         aimAngle: CGFloat,
         wantsToAttack: Bool,
+        attackTargetID: String? = nil,
         wantsToOpenChestID: String? = nil,
         wantsToCollectPowerUpID: String? = nil
     ) {
@@ -259,11 +261,37 @@ struct MultiplayerPlayerInput: Codable, Equatable, Sendable {
         movementY = Double(movement.dy)
         self.aimAngle = Double(aimAngle)
         self.wantsToAttack = wantsToAttack
+        self.attackTargetID = attackTargetID
         self.wantsToOpenChestID = wantsToOpenChestID
         self.wantsToCollectPowerUpID = wantsToCollectPowerUpID
     }
 
     var movement: CGVector { CGVector(dx: movementX, dy: movementY) }
+}
+
+struct MultiplayerCompactPlayerState: Codable, Equatable, Sendable {
+    let id: String
+    let x: Double
+    let y: Double
+    let rotation: Double
+    let health: Double
+    let attackTargetID: String?
+}
+
+struct MultiplayerZombieTargetOverride: Codable, Equatable, Sendable {
+    let zombieID: String
+    let targetPlayerID: String?
+    let effectiveTick: UInt64
+}
+
+struct MultiplayerCompactSnapshot: Codable, Equatable, Sendable {
+    let sequence: UInt64
+    let simulationTick: UInt64
+    let seed: UInt64
+    let hostID: String
+    let players: [MultiplayerCompactPlayerState]
+    let zombieTargetOverrides: [MultiplayerZombieTargetOverride]
+    let acknowledgedInputSequences: [String: UInt64]
 }
 
 struct MultiplayerGameplayEvent: Codable, Equatable, Sendable {
@@ -393,6 +421,7 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
     case joinAccepted(MultiplayerJoinAccepted)
     case playerUpdate(MultiplayerPlayerState)
     case boardSnapshot(MultiplayerBoardState)
+    case compactSnapshot(MultiplayerCompactSnapshot)
     case playerInput(MultiplayerPlayerInput)
     case gameplayEvent(MultiplayerGameplayEvent)
 
@@ -404,6 +433,7 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case accepted
         case player
         case board
+        case compactSnapshot
         case input
         case gameplayEvent
     }
@@ -415,6 +445,7 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case joinAccepted
         case playerUpdate
         case boardSnapshot
+        case compactSnapshot
         case playerInput
         case gameplayEvent
     }
@@ -435,6 +466,8 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
             self = .playerUpdate(try container.decode(MultiplayerPlayerState.self, forKey: .player))
         case .boardSnapshot:
             self = .boardSnapshot(try container.decode(MultiplayerBoardState.self, forKey: .board))
+        case .compactSnapshot:
+            self = .compactSnapshot(try container.decode(MultiplayerCompactSnapshot.self, forKey: .compactSnapshot))
         case .playerInput:
             self = .playerInput(try container.decode(MultiplayerPlayerInput.self, forKey: .input))
         case .gameplayEvent:
@@ -463,6 +496,9 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case let .boardSnapshot(board):
             try container.encode(MessageType.boardSnapshot, forKey: .type)
             try container.encode(board, forKey: .board)
+        case let .compactSnapshot(snapshot):
+            try container.encode(MessageType.compactSnapshot, forKey: .type)
+            try container.encode(snapshot, forKey: .compactSnapshot)
         case let .playerInput(input):
             try container.encode(MessageType.playerInput, forKey: .type)
             try container.encode(input, forKey: .input)
@@ -658,8 +694,12 @@ extension MultipeerConnectivitySession: AppleMultipeerConnectivityAdapterDelegat
     }
 
     func appleAdapter(_ adapter: AppleMultipeerConnectivityAdapter, didReceive data: Data, from peerID: String) {
-        guard adapter === appleAdapter else { return }
-        delegate?.transport(self, didReceive: data, from: peerID)
+        guard adapter === appleAdapter,
+              let message = try? MultiplayerWireMessage.decode(data) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.transport(self, didReceive: message, from: peerID)
+        }
     }
 }
 
@@ -690,15 +730,14 @@ extension MultipeerConnectivitySession: MCSessionDelegate {
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard self.session === session else { return }
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in
-                self?.session(session, didReceive: data, fromPeer: peerID)
-            }
-            return
+        guard self.session === session,
+              !isDisconnecting,
+              let message = try? MultiplayerWireMessage.decode(data) else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.transport(self, didReceive: message, from: peerID.displayName)
         }
-        guard !isDisconnecting else { return }
-        delegate?.transport(self, didReceive: data, from: peerID.displayName)
     }
 
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
