@@ -48,6 +48,8 @@ final class GameScene: SKScene {
     private var multiplayerCoordinator: MultiplayerSessionCoordinator?
     private var multiplayerColor: MultiplayerPlayerColor = .blue
     private var lastMultiplayerSyncTime: TimeInterval = 0
+    private var nextMultiplayerSyncTime: TimeInterval?
+    private var lastSentClientInputSequence: UInt64 = 0
     private var hasReceivedFirstUpdate = false
     private var localInputSequence: UInt64 = 0
     private var gameplayEventSequence: UInt64 = 0
@@ -72,6 +74,10 @@ final class GameScene: SKScene {
     private var acceptedHostID: String?
     private var lastClientSnapshotLogTime: TimeInterval = 0
     private var lastClientRenderLogTime: TimeInterval = 0
+    private var lastClientInputLogTime: TimeInterval = 0
+    private var lastClientInputSendLogTime: TimeInterval = 0
+    private var lastClientInputSendGameTime: TimeInterval?
+    private var clientMotionMaxRenderStep: CGFloat = 0
     private var isMultiplayerClient: Bool {
         multiplayerCoordinator?.role == .client
     }
@@ -495,17 +501,26 @@ final class GameScene: SKScene {
         clientPredictionDriver = driver
         guard let state = steps.last,
               let localPlayer = state.state.players.first(where: { $0.id == session.localPeerID }) else { return }
+        let previousRenderPosition = playerNode.position
         playerNode.position = MultiplayerInterpolation.position(
             current: playerNode.position,
             target: localPlayer.position.cgPoint,
             deltaTime: dt,
-            responsiveness: 6
+            responsiveness: 14
         )
+        clientMotionMaxRenderStep = max(
+            clientMotionMaxRenderStep,
+            hypot(
+                playerNode.position.x - previousRenderPosition.x,
+                playerNode.position.y - previousRenderPosition.y
+            )
+        )
+        logClientInput(input: input, predictedPosition: localPlayer.position.cgPoint, dt: dt)
         playerNode.zRotation = MultiplayerInterpolation.angle(
             current: playerNode.zRotation,
             target: CGFloat(localPlayer.rotation),
             deltaTime: dt,
-            responsiveness: 6
+            responsiveness: 10
         )
     }
 
@@ -897,6 +912,9 @@ final class GameScene: SKScene {
         gameplayEventSequence = 0
         pendingChestInteractionID = nil
         pendingPowerUpInteractionID = nil
+        lastMultiplayerSyncTime = 0
+        nextMultiplayerSyncTime = nil
+        lastSentClientInputSequence = 0
 
         spawnInitialChests()
         if let session = multiplayerTransport {
@@ -971,8 +989,19 @@ final class GameScene: SKScene {
     }
 
     private func syncLocalPlayerIfNeeded(at currentTime: TimeInterval) {
-        guard currentTime - lastMultiplayerSyncTime >= 0.1,
-              let session = multiplayerTransport else { return }
+        let syncInterval = isMultiplayerClient ? (1.0 / 30.0) : 0.1
+        if isMultiplayerClient {
+            guard let latestInput = latestLocalPlayerInput,
+                  latestInput.sequence == 1
+                    || latestInput.sequence >= lastSentClientInputSequence &+ 2 else {
+                return
+            }
+        } else {
+            let scheduledTime = nextMultiplayerSyncTime ?? currentTime
+            guard currentTime >= scheduledTime else { return }
+            nextMultiplayerSyncTime = currentTime + syncInterval
+        }
+        guard let session = multiplayerTransport else { return }
         lastMultiplayerSyncTime = currentTime
         let state = MultiplayerPlayerState(
             id: session.localPeerID,
@@ -988,7 +1017,7 @@ final class GameScene: SKScene {
         hostID = MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values))
         if isMultiplayerClient {
             guard let input = latestLocalPlayerInput else { return }
-            multiplayerCoordinator?.sendPlayerInput(MultiplayerPlayerInput(
+            let outgoingInput = MultiplayerPlayerInput(
                 playerID: input.playerID,
                 sequence: input.sequence,
                 movement: CGVector(dx: input.movement.x, dy: input.movement.y),
@@ -996,7 +1025,10 @@ final class GameScene: SKScene {
                 wantsToAttack: input.wantsToAttack,
                 wantsToOpenChestID: pendingChestInteractionID ?? input.wantsToOpenChestID,
                 wantsToCollectPowerUpID: pendingPowerUpInteractionID ?? input.wantsToCollectPowerUpID
-            ))
+            )
+            multiplayerCoordinator?.sendPlayerInput(outgoingInput)
+            lastSentClientInputSequence = outgoingInput.sequence
+            logClientInputSent(outgoingInput, at: currentTime)
             pendingChestInteractionID = nil
             pendingPowerUpInteractionID = nil
             return
@@ -1049,6 +1081,7 @@ final class GameScene: SKScene {
         hostID = board.hostID
         guard isMultiplayerClient else { return }
 
+        let predictionTick = clientPredictionDriver?.state.tick
         let predictionSeed = clientPredictionDriver?.state.seed ?? 0
         let authoritativeState = GameStateMultiplayerMapper.gameState(from: board, seed: predictionSeed)
         clientPredictionHistory.acknowledge(
@@ -1059,7 +1092,8 @@ final class GameScene: SKScene {
             authoritativeState: authoritativeState,
             acknowledgedInputSequence: board.acknowledgedInputSequences[multiplayerTransport?.localPeerID ?? ""] ?? 0,
             pendingInputs: clientPredictionHistory.pendingInputs,
-            simulation: GameSimulation()
+            simulation: GameSimulation(),
+            targetTick: max(predictionTick ?? board.simulationTick, authoritativeState.tick)
         )
         clientPredictionDriver = FixedTickSimulationDriver(initialState: reconciledState)
         logClientSnapshot(board: board, predictedState: reconciledState)
@@ -1131,7 +1165,7 @@ final class GameScene: SKScene {
                     maxExtrapolationTicks: maxExtrapolationTicks
                 ) {
                     multiplayerTargetPositions[id] = sampled
-                    player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 6)
+                    player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 10)
                 }
             }
             for node in zombies + chests + powerUps {
@@ -1143,7 +1177,7 @@ final class GameScene: SKScene {
                           maxExtrapolationTicks: maxExtrapolationTicks
                       ) else { continue }
                 multiplayerTargetPositions[id] = sampled
-                node.position = MultiplayerInterpolation.position(current: node.position, target: sampled, deltaTime: dt, responsiveness: 6)
+                node.position = MultiplayerInterpolation.position(current: node.position, target: sampled, deltaTime: dt, responsiveness: 10)
             }
             logClientRenderState()
             return
@@ -1171,27 +1205,54 @@ final class GameScene: SKScene {
         let predicted = predictedState.players.first { $0.id == localID }?.position.cgPoint ?? .zero
         let correction = hypot(predicted.x - authoritative.x, predicted.y - authoritative.y)
         let ageMilliseconds = max(0, (now - board.serverTime) * 1_000)
-        let remotePositions = board.players
-            .filter { $0.id != localID }
-            .map { "\($0.id.prefix(8))=\(format($0.position))" }
-            .joined(separator: ",")
-
-        print("[Multiplayer][ClientSnapshot] seq=\(board.sequence) tick=\(board.simulationTick) ageMs=\(String(format: "%.1f", ageMilliseconds)) buffer=\(receivedSnapshotBuffer.snapshots.count) localAuth=\(format(authoritative)) localPred=\(format(predicted)) correction=\(String(format: "%.1f", correction)) remote=\(remotePositions)")
+        let acknowledgedSequence = board.acknowledgedInputSequences[localID] ?? 0
+        let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+        print("[Multiplayer][ClientSnapshot] timeMs=\(String(format: "%.1f", timestampMilliseconds)) seq=\(board.sequence) tick=\(board.simulationTick) ageMs=\(String(format: "%.1f", ageMilliseconds)) buffer=\(receivedSnapshotBuffer.snapshots.count) ackInput=\(acknowledgedSequence) localAuth=\(format(authoritative)) localPred=\(format(predicted)) correction=\(String(format: "%.1f", correction))")
     }
 
     private func logClientRenderState() {
         let now = Date().timeIntervalSince1970
         guard now - lastClientRenderLogTime >= 0.2 else { return }
 
+        let localID = multiplayerTransport?.localPeerID ?? "unknown"
+        let predicted = clientPredictionDriver?.state.players
+            .first { $0.id == localID }?.position.cgPoint ?? playerNode.position
+        let localError = hypot(
+            playerNode.position.x - predicted.x,
+            playerNode.position.y - predicted.y
+        )
         let remotePositions = remotePlayers
             .sorted { $0.key < $1.key }
             .map { id, player in
                 let target = multiplayerTargetPositions[id] ?? .zero
-                return "\(id.prefix(8))=actual:\(format(player.position)),target:\(format(target))"
+                let error = hypot(
+                    player.position.x - target.x,
+                    player.position.y - target.y
+                )
+                return "\(id.prefix(8))=actual:\(format(player.position)),target:\(format(target)),error:\(String(format: "%.1f", error))"
             }
             .joined(separator: ",")
-        print("[Multiplayer][ClientRender] renderTick=\(UInt64(max(0, multiplayerRenderTick.rounded(.down)))) local=\(format(playerNode.position)) remote=\(remotePositions)")
+        let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+        print("[Multiplayer][ClientMotion] timeMs=\(String(format: "%.1f", timestampMilliseconds)) renderTick=\(UInt64(max(0, multiplayerRenderTick.rounded(.down)))) local=\(format(playerNode.position)) predicted=\(format(predicted)) error=\(String(format: "%.1f", localError)) maxFrameStep=\(String(format: "%.1f", clientMotionMaxRenderStep)) remote=\(remotePositions)")
+        clientMotionMaxRenderStep = 0
         lastClientRenderLogTime = now
+    }
+
+    private func logClientInput(input: PlayerInput, predictedPosition: CGPoint, dt: TimeInterval) {
+        let now = Date().timeIntervalSince1970
+        guard now - lastClientInputLogTime >= 0.2 else { return }
+        lastClientInputLogTime = now
+        let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+        print("[Multiplayer][ClientInput] timeMs=\(String(format: "%.1f", timestampMilliseconds)) seq=\(input.sequence) dtMs=\(String(format: "%.1f", dt * 1_000)) movement=\(format(input.movement.cgPoint)) aim=\(String(format: "%.2f", input.aimAngle)) predicted=\(format(predictedPosition))")
+    }
+
+    private func logClientInputSent(_ input: MultiplayerPlayerInput, at currentTime: TimeInterval) {
+        let interval = lastClientInputSendGameTime.map { currentTime - $0 } ?? 0
+        lastClientInputSendGameTime = currentTime
+        guard currentTime - lastClientInputSendLogTime >= 0.2 else { return }
+        lastClientInputSendLogTime = currentTime
+        let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+        print("[Multiplayer][ClientInputSend] timeMs=\(String(format: "%.1f", timestampMilliseconds)) seq=\(input.sequence) intervalMs=\(String(format: "%.1f", interval * 1_000)) movement=(\(String(format: "%.2f", input.movementX)),\(String(format: "%.2f", input.movementY)))")
     }
 
     private func format(_ point: CGPoint) -> String {

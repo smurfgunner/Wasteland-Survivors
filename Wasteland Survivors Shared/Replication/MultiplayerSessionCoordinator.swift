@@ -48,6 +48,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     private var acknowledgedInputSequencesStorage: [String: UInt64] = [:]
     private var queuedInputs: [MultiplayerPlayerInput] = []
     private var latestInputs: [String: MultiplayerPlayerInput] = [:]
+    private var lastInputReceiveLogTime: TimeInterval = 0
+    private var lastInputConsumeLogTime: TimeInterval = 0
     private var appliedEvents = AppliedEventStore()
     private var hasSentHello = false
 
@@ -124,11 +126,30 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         latestInputs.merge(inputsByPlayer) { current, replacement in
             isNewer(current.sequence, than: replacement.sequence) ? current : replacement
         }
-        for input in latestInputs.values {
+        let inputsToApply = latestInputs.values.sorted { $0.playerID < $1.playerID }
+        for input in inputsToApply {
             acknowledgedInputSequencesStorage[input.playerID] = input.sequence
+            latestInputs[input.playerID] = MultiplayerPlayerInput(
+                playerID: input.playerID,
+                sequence: input.sequence,
+                movement: input.movement,
+                aimAngle: input.aimAngle,
+                wantsToAttack: input.wantsToAttack,
+                wantsToOpenChestID: nil,
+                wantsToCollectPowerUpID: nil
+            )
+        }
+        let now = Date().timeIntervalSince1970
+        if now - lastInputConsumeLogTime >= 0.2, !inputsToApply.isEmpty {
+            lastInputConsumeLogTime = now
+            let summary = inputsToApply.map {
+                "\($0.playerID.prefix(8))=seq:\($0.sequence),move:(\(String(format: "%.2f", $0.movementX)),\(String(format: "%.2f", $0.movementY)))"
+            }.joined(separator: ",")
+            let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+            print("[Multiplayer][HostInputConsume] timeMs=\(String(format: "%.1f", timestampMilliseconds)) count=\(inputsToApply.count) retained=\(latestInputs.count) inputs=\(summary)")
         }
         queuedInputs.removeAll()
-        return latestInputs.values.sorted { $0.playerID < $1.playerID }
+        return inputsToApply
     }
 
     func broadcastGameplayEvent(_ event: GameplayEvent, sequence: UInt64, tick: UInt64) {
@@ -161,6 +182,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
             latestSnapshotSequence = nil
             latestAcknowledgedInputSequences.removeAll()
             queuedInputs.removeAll()
+            latestInputs.removeAll()
             appliedEvents = AppliedEventStore()
         }
     }
@@ -337,6 +359,12 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         latestInputSequences[input.playerID] = input.sequence
         latestInputs[input.playerID] = input
         queuedInputs.append(input)
+        let now = Date().timeIntervalSince1970
+        if now - lastInputReceiveLogTime >= 0.2 {
+            lastInputReceiveLogTime = now
+            let timestampMilliseconds = ProcessInfo.processInfo.systemUptime * 1_000
+            print("[Multiplayer][HostInputReceive] timeMs=\(String(format: "%.1f", timestampMilliseconds)) player=\(input.playerID.prefix(8)) seq=\(input.sequence) movement=(\(String(format: "%.2f", input.movementX)),\(String(format: "%.2f", input.movementY)))")
+        }
         onInput?(input)
     }
 

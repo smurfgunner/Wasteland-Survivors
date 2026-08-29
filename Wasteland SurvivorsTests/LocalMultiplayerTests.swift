@@ -752,6 +752,115 @@ struct LocalMultiplayerTests {
         #expect(correctionDistance <= 9)
     }
 
+    @Test("Client keeps local rendering close to predicted movement during sustained input")
+    @MainActor
+    func clientKeepsLocalRenderingCloseToPredictedMovementDuringSustainedInput() throws {
+        // Given a client predicting one second of uninterrupted movement.
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+
+        // When the render loop advances for one second.
+        scene.update(0)
+        for frame in 1...60 {
+            scene.update(Double(frame) / 60.0)
+        }
+
+        // Then the visible player stays close to the continuously predicted position.
+        // At the game's movement speed, one second is approximately 180 points.
+        #expect(scene.playerNode.position.x >= 165)
+    }
+
+    @Test("Client catches up after a local direction reversal")
+    @MainActor
+    func clientCatchesUpAfterLocalDirectionReversal() throws {
+        // Given a client that has been predicting movement to the right.
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        scene.update(0)
+        for frame in 1...30 {
+            scene.update(Double(frame) / 60.0)
+        }
+
+        // When the player reverses direction for another half second.
+        scene.movementVector = CGVector(dx: -1, dy: 0)
+        for frame in 31...60 {
+            scene.update(Double(frame) / 60.0)
+        }
+
+        // Then the visible player has caught up with the predicted reversal.
+        #expect(abs(scene.playerNode.position.x) <= 18)
+    }
+
+    @Test("Client sends prediction input at a stable 30 Hz cadence")
+    @MainActor
+    func clientSendsPredictionInputAtStableCadence() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        scene.update(0)
+        for frame in 1...60 {
+            scene.update(Double(frame) / 60.0)
+        }
+
+        let inputs = session.sentData.compactMap { data -> MultiplayerPlayerInput? in
+            guard case let .playerInput(input) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            return input
+        }
+
+        #expect(inputs.count >= 29)
+        #expect(inputs.count <= 31)
+        #expect(inputs.dropFirst().allSatisfy { input in
+            guard let previous = inputs.first(where: { $0.sequence == input.sequence - 2 }) else {
+                return false
+            }
+            return input.sequence - previous.sequence <= 2
+        })
+    }
+
     @Test("Client interpolates remote movement without a large frame jump")
     @MainActor
     func clientInterpolatesRemoteMovementWithoutLargeFrameJump() throws {
@@ -826,6 +935,7 @@ struct LocalMultiplayerTests {
             previousPosition = currentPosition
         }
         #expect(remotePlayer.position.x > 0)
+        #expect(remotePlayer.position.x >= 95)
     }
 
     @Test("Rotation interpolation follows the shortest angular path")

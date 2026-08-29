@@ -175,14 +175,22 @@ struct LocalPredictionReconciler {
         authoritativeState: GameState,
         acknowledgedInputSequence: UInt64,
         pendingInputs: [PlayerInput],
-        simulation: GameSimulation
+        simulation: GameSimulation,
+        targetTick: UInt64? = nil
     ) -> GameState {
         var state = authoritativeState
         let replayInputs = pendingInputs
             .filter { $0.sequence > acknowledgedInputSequence }
             .sorted { $0.sequence < $1.sequence }
+        let ticksToReplay = targetTick.map {
+            $0 > state.tick ? $0 - state.tick : 0
+        } ?? UInt64(replayInputs.count)
 
-        for input in replayInputs {
+        // Input sequence numbers identify client inputs, not simulation ticks.
+        // A delayed snapshot may leave many inputs pending, but replaying all of
+        // them would advance prediction into the future. Only replay enough
+        // inputs to reach the client's current simulation tick.
+        for input in replayInputs.prefix(Int(min(UInt64(replayInputs.count), ticksToReplay))) {
             state = simulation.advance(state, inputs: [input], tick: state.tick + 1).state
         }
         return state

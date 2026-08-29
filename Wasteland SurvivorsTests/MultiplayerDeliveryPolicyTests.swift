@@ -13,7 +13,7 @@ struct MultiplayerDeliveryPolicyTests {
             movement: .zero,
             aimAngle: 0,
             wantsToAttack: false
-        )).deliveryPolicy == .reliable)
+        )).deliveryPolicy == .replaceable)
         #expect(MultiplayerWireMessage.boardSnapshot(.empty(hostID: "h", sequence: 1)).deliveryPolicy == .replaceable)
     }
 

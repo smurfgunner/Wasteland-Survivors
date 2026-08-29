@@ -226,9 +226,9 @@ struct MultiplayerBoardState: Codable, Equatable, Sendable {
 extension MultiplayerWireMessage {
     var deliveryPolicy: MultiplayerDeliveryPolicy {
         switch self {
-        case .playerUpdate, .boardSnapshot:
+        case .playerUpdate, .boardSnapshot, .playerInput:
             return .replaceable
-        case .playerInput, .gameplayEvent, .hello, .hostAnnouncement, .joinRequest, .joinAccepted:
+        case .gameplayEvent, .hello, .hostAnnouncement, .joinRequest, .joinAccepted:
             return .reliable
         }
     }
@@ -306,6 +306,7 @@ struct MultiplayerGameplayEvent: Codable, Equatable, Sendable {
 
 struct MultiplayerSnapshotBuffer {
     private(set) var snapshots: [MultiplayerBoardState] = []
+    private var tickOrderedSnapshots: [MultiplayerBoardState] = []
     let capacity: Int
 
     var latest: MultiplayerBoardState? {
@@ -322,20 +323,24 @@ struct MultiplayerSnapshotBuffer {
 
         snapshots.append(snapshot)
         snapshots.sort { $0.sequence < $1.sequence }
+        tickOrderedSnapshots.append(snapshot)
+        tickOrderedSnapshots.sort { $0.simulationTick < $1.simulationTick }
         if snapshots.count > capacity {
-            snapshots.removeFirst(snapshots.count - capacity)
+            let removedCount = snapshots.count - capacity
+            let removed = snapshots.prefix(removedCount)
+            let removedSequences = Set(removed.map(\.sequence))
+            snapshots.removeFirst(removedCount)
+            tickOrderedSnapshots.removeAll { removedSequences.contains($0.sequence) }
         }
         return true
     }
 
     func surrounding(tick: UInt64) -> (before: MultiplayerBoardState, after: MultiplayerBoardState)? {
-        // Snapshots are kept in sequence order by append(), and simulation ticks
-        // advance with that sequence. Avoid sorting the history for every sample.
-        guard let afterIndex = snapshots.firstIndex(where: { $0.simulationTick >= tick }),
+        guard let afterIndex = tickOrderedSnapshots.firstIndex(where: { $0.simulationTick >= tick }),
               afterIndex > 0 else {
             return nil
         }
-        return (snapshots[afterIndex - 1], snapshots[afterIndex])
+        return (tickOrderedSnapshots[afterIndex - 1], tickOrderedSnapshots[afterIndex])
     }
 
     func position(
@@ -346,10 +351,7 @@ struct MultiplayerSnapshotBuffer {
     ) -> CGPoint? {
         guard !snapshots.isEmpty else { return nil }
         let targetTick = renderTick > delayTicks ? renderTick - delayTicks : 0
-        // append() maintains sequence order, which is also simulation-tick
-        // order. This method is called for every rendered entity, so sorting here
-        // would turn a small interpolation step into repeated per-frame work.
-        let ordered = snapshots
+        let ordered = tickOrderedSnapshots
         func point(in snapshot: MultiplayerBoardState) -> CGPoint? {
             if let player = snapshot.players.first(where: { $0.id == entityID }) { return player.position }
             if let zombie = snapshot.zombies.first(where: { $0.id == entityID }) { return CGPoint(x: zombie.x, y: zombie.y) }

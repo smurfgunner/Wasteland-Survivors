@@ -262,7 +262,7 @@ struct MultiplayerSessionCoordinatorTests {
         }
         #expect(sentInput == input)
         #expect(session.directedPeerIDs.last == "host")
-        #expect(session.deliveryPolicies.last == .reliable)
+        #expect(session.deliveryPolicies.last == .replaceable)
     }
 
     @Test("Transport identity is required for a player input")
@@ -571,7 +571,7 @@ struct MultiplayerSessionCoordinatorTests {
         session.deliver(try MultiplayerWireMessage.playerInput(input).encoded())
 
         #expect(coordinator.consumeQueuedInputs() == [input])
-        #expect(coordinator.consumeQueuedInputs().isEmpty)
+        #expect(coordinator.consumeQueuedInputs() == [input])
     }
 
     @Test("Consuming host inputs exposes per-player acknowledgement sequences")

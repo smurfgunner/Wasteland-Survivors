@@ -195,6 +195,41 @@ struct MultiplayerArchitectureContractTests {
         })
     }
 
+    @Test("Client reconciliation never replays stale pending inputs beyond the current prediction tick")
+    func clientReconciliationIsBoundedByCurrentPredictionTick() {
+        let simulation = GameSimulation()
+        var authoritativeState = GameState.initial(seed: 9_901, playerID: "client")
+        for tick in 1...271 {
+            authoritativeState = simulation.advance(
+                authoritativeState,
+                inputs: [],
+                tick: UInt64(tick)
+            ).state
+        }
+
+        let pendingInputs = (247...276).map {
+            PlayerInput(
+                playerID: "client",
+                sequence: UInt64($0),
+                movement: CGPointValue(x: 1, y: 0),
+                aimAngle: 0
+            )
+        }
+
+        let reconciled = LocalPredictionReconciler.reconcile(
+            authoritativeState: authoritativeState,
+            acknowledgedInputSequence: 246,
+            pendingInputs: pendingInputs,
+            simulation: simulation,
+            targetTick: 276
+        )
+
+        // The old implementation advanced one simulation tick per pending input
+        // and incorrectly produced tick 301 for this exact stale-ack pattern.
+        #expect(reconciled.tick == 276)
+        #expect(reconciled.players[0].position.x - authoritativeState.players[0].position.x == 15)
+    }
+
     @Test("Gameplay event variants have stable non-empty IDs and are codable")
     func gameplayEventVariantsHaveStableIDsAndAreCodable() throws {
         let events: [GameplayEvent] = [
@@ -729,7 +764,7 @@ struct MultiplayerArchitectureContractTests {
         try transport.deliver(.playerInput(other), from: "client-a")
 
         #expect(coordinator.consumeQueuedInputs() == [other, newer])
-        #expect(coordinator.consumeQueuedInputs().isEmpty)
+        #expect(coordinator.consumeQueuedInputs() == [other, newer])
     }
 
     @Test("Local reconciliation restores authority and replays unacknowledged inputs")
