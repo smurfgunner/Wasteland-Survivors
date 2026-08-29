@@ -42,6 +42,14 @@ struct LocalMultiplayerTests {
         #expect(secondColor == .red)
     }
 
+    @Test("The earliest advertiser remains authoritative")
+    func earliestAdvertiserIsHost() {
+        let later = MultiplayerPlayerState(id: "first-alphabetically", position: .zero, color: .blue, sessionStartedAt: 20)
+        let earlier = MultiplayerPlayerState(id: "second-alphabetically", position: .zero, color: .red, sessionStartedAt: 10)
+
+        #expect(MultiplayerHostSelector.hostID(for: [later, earlier]) == "second-alphabetically")
+    }
+
     @Test("Spawns a joining player near the host")
     func spawnPositionIsNearHost() {
         let hostPosition = CGPoint(x: 120, y: -80)
@@ -196,5 +204,137 @@ struct LocalMultiplayerTests {
         #expect(scene.chests.count == 1)
         #expect(scene.powerUps.count == 1)
         #expect(scene.worldNode.children.contains { $0 is ProjectileNode })
+    }
+
+    @Test("Interpolation moves toward the host target without teleporting")
+    func interpolationMovesTowardTarget() {
+        let current = CGPoint(x: 0, y: 0)
+        let target = CGPoint(x: 100, y: 0)
+
+        let next = MultiplayerInterpolation.position(
+            current: current,
+            target: target,
+            deltaTime: 1.0 / 60.0,
+            responsiveness: 10
+        )
+
+        #expect(next.x > current.x)
+        #expect(next.x < target.x)
+    }
+
+    @Test("Interpolation converges to nearby authoritative positions")
+    func interpolationConvergesToTarget() {
+        var position = CGPoint.zero
+        let target = CGPoint(x: 10, y: -20)
+
+        for _ in 0..<120 {
+            position = MultiplayerInterpolation.position(
+                current: position,
+                target: target,
+                deltaTime: 1.0 / 60.0,
+                responsiveness: 12
+            )
+        }
+
+        #expect(hypot(position.x - target.x, position.y - target.y) < 0.1)
+    }
+
+    @Test("Player input round-trips with its sequence number")
+    func playerInputRoundTrips() throws {
+        let input = MultiplayerPlayerInput(
+            playerID: "client",
+            sequence: 17,
+            movement: CGVector(dx: 1, dy: -1),
+            aimAngle: 0.75,
+            wantsToAttack: true
+        )
+
+        let decoded = try MultiplayerWireMessage.decode(
+            MultiplayerWireMessage.playerInput(input).encoded()
+        )
+
+        #expect(decoded == .playerInput(input))
+    }
+
+    @Test("Snapshot buffer rejects stale snapshots")
+    func snapshotBufferRejectsStaleSnapshots() {
+        var buffer = MultiplayerSnapshotBuffer()
+        let first = MultiplayerBoardState.empty(hostID: "host", sequence: 10)
+        let stale = MultiplayerBoardState.empty(hostID: "host", sequence: 9)
+
+        let acceptedFirst = buffer.append(first)
+        let acceptedStale = buffer.append(stale)
+
+        #expect(acceptedFirst)
+        #expect(!acceptedStale)
+        #expect(buffer.latest?.sequence == 10)
+    }
+
+    @Test("Client ignores snapshots from a different host")
+    @MainActor
+    func clientIgnoresSnapshotsFromDifferentHost() async throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionFactory: { session })
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+
+        let first = MultiplayerBoardState.empty(hostID: "host-a", sequence: 1)
+        let second = MultiplayerBoardState(sequence: 2, hostID: "host-b", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 99)
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(first).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(second).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(scene.killCount == 0)
+    }
+
+    @Test("Every networked gameplay entity receives a unique stable ID")
+    func gameplayEntitiesHaveStableIDs() {
+        let zombie = ZombieNode()
+        let chest = ChestNode()
+        let powerUp = PowerUpNode(powerUp: .damage)
+        let projectile = ProjectileNode(weapon: .pistol, directionAngle: 0)
+
+        let ids = [zombie.multiplayerID, chest.multiplayerID, powerUp.multiplayerID, projectile.multiplayerID]
+        #expect(ids.allSatisfy { !$0.isEmpty })
+        #expect(Set(ids).count == ids.count)
+    }
+
+    @Test("An entity keeps its ID when it is serialized into a snapshot")
+    func snapshotUsesEntityIDs() {
+        let zombie = ZombieNode()
+        let chest = ChestNode()
+        let powerUp = PowerUpNode(powerUp: .range)
+        let projectile = ProjectileNode(weapon: .rifle, directionAngle: 0.2)
+
+        #expect(MultiplayerSnapshotEntityIDs.zombie(zombie) == zombie.multiplayerID)
+        #expect(MultiplayerSnapshotEntityIDs.chest(chest) == chest.multiplayerID)
+        #expect(MultiplayerSnapshotEntityIDs.powerUp(powerUp) == powerUp.multiplayerID)
+        #expect(MultiplayerSnapshotEntityIDs.projectile(projectile) == projectile.multiplayerID)
+    }
+
+    @Test("Host reflects client movement through the remote player target")
+    @MainActor
+    func hostReflectsClientMovement() async throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionFactory: { session })
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+
+        let first = MultiplayerPlayerState(id: "client", position: CGPoint(x: 10, y: 0), color: .red, sessionStartedAt: 10)
+        session.deliver(try MultiplayerWireMessage.playerUpdate(first).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+        scene.update(1)
+
+        let second = MultiplayerPlayerState(id: "client", position: CGPoint(x: 100, y: 0), color: .red, sessionStartedAt: 10)
+        session.deliver(try MultiplayerWireMessage.playerUpdate(second).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+        scene.update(1.016)
+
+        let reflectedX = try #require(scene.remotePlayers["client"]?.position.x)
+        #expect(reflectedX > 10)
+        #expect(reflectedX < 100)
     }
 }

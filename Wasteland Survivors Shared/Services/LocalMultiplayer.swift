@@ -34,8 +34,9 @@ struct MultiplayerPlayerState: Codable, Equatable, Sendable {
     let weapon: WeaponType
     let powerUps: [PowerUpType]
     let rotation: Double
+    let sessionStartedAt: Double
 
-    init(id: String, position: CGPoint, color: MultiplayerPlayerColor, health: CGFloat = 100, weapon: WeaponType = .pistol, powerUps: [PowerUpType] = [], rotation: CGFloat = 0) {
+    init(id: String, position: CGPoint, color: MultiplayerPlayerColor, health: CGFloat = 100, weapon: WeaponType = .pistol, powerUps: [PowerUpType] = [], rotation: CGFloat = 0, sessionStartedAt: TimeInterval = 0) {
         self.id = id
         x = Double(position.x)
         y = Double(position.y)
@@ -44,6 +45,7 @@ struct MultiplayerPlayerState: Codable, Equatable, Sendable {
         self.weapon = weapon
         self.powerUps = powerUps
         self.rotation = Double(rotation)
+        self.sessionStartedAt = sessionStartedAt
     }
 
     var position: CGPoint {
@@ -51,6 +53,15 @@ struct MultiplayerPlayerState: Codable, Equatable, Sendable {
     }
 
     var rotationAngle: CGFloat { CGFloat(rotation) }
+}
+
+enum MultiplayerHostSelector {
+    static func hostID(for players: [MultiplayerPlayerState]) -> String? {
+        players.min {
+            if $0.sessionStartedAt == $1.sessionStartedAt { return $0.id < $1.id }
+            return $0.sessionStartedAt < $1.sessionStartedAt
+        }?.id
+    }
 }
 
 struct MultiplayerZombieState: Codable, Equatable, Sendable {
@@ -84,6 +95,8 @@ struct MultiplayerProjectileState: Codable, Equatable, Sendable {
 }
 
 struct MultiplayerBoardState: Codable, Equatable, Sendable {
+    let sequence: UInt64
+    let timestamp: TimeInterval
     let hostID: String
     let players: [MultiplayerPlayerState]
     let zombies: [MultiplayerZombieState]
@@ -91,21 +104,70 @@ struct MultiplayerBoardState: Codable, Equatable, Sendable {
     let powerUps: [MultiplayerPowerUpState]
     let projectiles: [MultiplayerProjectileState]
     let killCount: Int
+
+    init(sequence: UInt64 = 0, timestamp: TimeInterval = 0, hostID: String, players: [MultiplayerPlayerState], zombies: [MultiplayerZombieState], chests: [MultiplayerChestState], powerUps: [MultiplayerPowerUpState], projectiles: [MultiplayerProjectileState], killCount: Int) {
+        self.sequence = sequence
+        self.timestamp = timestamp
+        self.hostID = hostID
+        self.players = players
+        self.zombies = zombies
+        self.chests = chests
+        self.powerUps = powerUps
+        self.projectiles = projectiles
+        self.killCount = killCount
+    }
+
+    static func empty(hostID: String, sequence: UInt64) -> Self {
+        Self(sequence: sequence, timestamp: 0, hostID: hostID, players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+    }
+}
+
+struct MultiplayerPlayerInput: Codable, Equatable, Sendable {
+    let playerID: String
+    let sequence: UInt64
+    let movementX: Double
+    let movementY: Double
+    let aimAngle: Double
+    let wantsToAttack: Bool
+
+    init(playerID: String, sequence: UInt64, movement: CGVector, aimAngle: CGFloat, wantsToAttack: Bool) {
+        self.playerID = playerID
+        self.sequence = sequence
+        movementX = Double(movement.dx)
+        movementY = Double(movement.dy)
+        self.aimAngle = Double(aimAngle)
+        self.wantsToAttack = wantsToAttack
+    }
+
+    var movement: CGVector { CGVector(dx: movementX, dy: movementY) }
+}
+
+struct MultiplayerSnapshotBuffer {
+    private(set) var latest: MultiplayerBoardState?
+
+    mutating func append(_ snapshot: MultiplayerBoardState) -> Bool {
+        guard latest.map({ $0.sequence < snapshot.sequence }) ?? true else { return false }
+        latest = snapshot
+        return true
+    }
 }
 
 enum MultiplayerWireMessage: Codable, Equatable, Sendable {
     case playerUpdate(MultiplayerPlayerState)
     case boardSnapshot(MultiplayerBoardState)
+    case playerInput(MultiplayerPlayerInput)
 
     private enum CodingKeys: String, CodingKey {
         case type
         case player
         case board
+        case input
     }
 
     private enum MessageType: String, Codable {
         case playerUpdate
         case boardSnapshot
+        case playerInput
     }
 
     init(from decoder: Decoder) throws {
@@ -116,6 +178,8 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
             self = .playerUpdate(try container.decode(MultiplayerPlayerState.self, forKey: .player))
         case .boardSnapshot:
             self = .boardSnapshot(try container.decode(MultiplayerBoardState.self, forKey: .board))
+        case .playerInput:
+            self = .playerInput(try container.decode(MultiplayerPlayerInput.self, forKey: .input))
         }
     }
 
@@ -128,6 +192,9 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case let .boardSnapshot(board):
             try container.encode(MessageType.boardSnapshot, forKey: .type)
             try container.encode(board, forKey: .board)
+        case let .playerInput(input):
+            try container.encode(MessageType.playerInput, forKey: .type)
+            try container.encode(input, forKey: .input)
         }
     }
 
@@ -172,6 +239,7 @@ protocol LocalMultiplayerNetworkSession: AnyObject {
 final class MultipeerConnectivitySession: NSObject, LocalMultiplayerNetworkSession {
     weak var delegate: LocalMultiplayerNetworkSessionDelegate?
     let localPlayerID: String
+    let sessionStartedAt: TimeInterval
 
     private let serviceType = "wasteland-surv"
     private let peerID: MCPeerID
@@ -181,6 +249,7 @@ final class MultipeerConnectivitySession: NSObject, LocalMultiplayerNetworkSessi
 
     init(playerName: String = "Wasteland Player") {
         localPlayerID = UUID().uuidString
+        sessionStartedAt = Date().timeIntervalSince1970
         peerID = MCPeerID(displayName: "\(playerName)-\(localPlayerID.prefix(4))")
         super.init()
     }

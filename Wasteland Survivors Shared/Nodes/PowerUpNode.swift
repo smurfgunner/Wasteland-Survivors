@@ -1,9 +1,11 @@
 import SpriteKit
 
 final class PowerUpNode: SKNode {
+    let multiplayerID: String
     let powerUp: PowerUpType
 
-    init(powerUp: PowerUpType) {
+    init(powerUp: PowerUpType, multiplayerID: String) {
+        self.multiplayerID = multiplayerID
         self.powerUp = powerUp
         super.init()
 
@@ -41,6 +43,10 @@ final class PowerUpNode: SKNode {
             .scale(to: 1.15, duration: 0.5),
             .scale(to: 1.0, duration: 0.5)
         ])), withKey: "powerUpPulse")
+    }
+
+    convenience init(powerUp: PowerUpType) {
+        self.init(powerUp: powerUp, multiplayerID: UUID().uuidString)
     }
 
     required init?(coder aDecoder: NSCoder) {

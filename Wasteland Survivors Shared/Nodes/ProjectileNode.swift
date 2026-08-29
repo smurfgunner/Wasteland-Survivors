@@ -1,13 +1,15 @@
 import SpriteKit
 
 final class ProjectileNode: SKNode {
+    let multiplayerID: String
     static let lifetime: TimeInterval = 0.7
 
     let weapon: WeaponType
     let damage: CGFloat
     private let projectileSpeed: CGFloat = 600
 
-    init(weapon: WeaponType, damage: CGFloat? = nil, directionAngle: CGFloat) {
+    init(weapon: WeaponType, damage: CGFloat? = nil, directionAngle: CGFloat, multiplayerID: String = UUID().uuidString) {
+        self.multiplayerID = multiplayerID
         self.weapon = weapon
         self.damage = damage ?? weapon.damage
         super.init()
