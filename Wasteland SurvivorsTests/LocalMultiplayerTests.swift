@@ -4,22 +4,59 @@ import Testing
 @testable import Wasteland_Survivors
 
 @MainActor
-private final class FakeMultiplayerSession: LocalMultiplayerNetworkSession {
-    weak var delegate: LocalMultiplayerNetworkSessionDelegate?
-    let localPlayerID: String
+private final class FakeMultiplayerSession: MultiplayerTransport {
+    weak var delegate: MultiplayerTransportDelegate?
+    let localPeerID: String
+    private(set) var state: MultiplayerTransportState = .idle
+    var connectedPeerIDs: Set<String> = []
     private(set) var started = false
     private(set) var sentData: [Data] = []
+    private(set) var deliveryPolicies: [MultiplayerDeliveryPolicy] = []
 
     init(localPlayerID: String) {
-        self.localPlayerID = localPlayerID
+        self.localPeerID = localPlayerID
     }
 
-    func start() { started = true }
-    func stop() {}
-    func send(_ data: Data) { sentData.append(data) }
+    func connect() {
+        started = true
+        state = .connected
+        connectedPeerIDs = [localPeerID]
+        delegate?.transport(self, didChange: state)
+    }
 
-    func deliver(_ data: Data) {
-        delegate?.networkSession(self, didReceive: data)
+    func disconnect() {
+        state = .disconnected
+        connectedPeerIDs.removeAll()
+        delegate?.transport(self, didChange: state)
+    }
+
+    func peerDisconnected(_ peerID: String) {
+        connectedPeerIDs.remove(peerID)
+        delegate?.transport(self, didChangePeer: peerID, state: .disconnected)
+    }
+
+    func send(_ data: Data, to peerID: String) throws { sentData.append(data) }
+    func broadcast(_ data: Data) throws { sentData.append(data) }
+
+    func broadcast(_ data: Data, delivery: MultiplayerDeliveryPolicy) throws {
+        deliveryPolicies.append(delivery)
+        try broadcast(data)
+    }
+
+    func deliver(_ data: Data, from peerID: String? = nil) {
+        guard let message = try? MultiplayerWireMessage.decode(data) else { return }
+        let senderID: String
+        switch message {
+        case let .hello(value): senderID = value.peerID
+        case let .hostAnnouncement(value): senderID = value.hostID
+        case let .joinRequest(value): senderID = value.peerID
+        case let .joinAccepted(value): senderID = value.hostID
+        case let .playerUpdate(value): senderID = value.id
+        case let .boardSnapshot(value): senderID = value.hostID
+        case let .playerInput(value): senderID = value.playerID
+        case let .gameplayEvent(value): senderID = value.hostID
+        }
+        delegate?.transport(self, didReceive: data, from: peerID ?? senderID)
     }
 }
 
@@ -110,6 +147,15 @@ struct LocalMultiplayerTests {
         #expect(menu?.childNode(withName: "multiplayerButton") != nil)
     }
 
+    @Test("New multiplayer scenes receive distinct session identities")
+    func newMultiplayerScenesReceiveDistinctSessionIdentities() {
+        let first = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
+        let second = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
+
+        #expect(!first.multiplayerSessionID.isEmpty)
+        #expect(first.multiplayerSessionID != second.multiplayerSessionID)
+    }
+
     @Test("Tapping local multiplayer starts the game")
     @MainActor
     func tappingLocalMultiplayerStartsTheGame() {
@@ -143,11 +189,19 @@ struct LocalMultiplayerTests {
         let session = FakeMultiplayerSession(localPlayerID: "host")
         let scene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
             multiplayerSessionFactory: { session }
         )
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
         scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "wasteland-survivors-local",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
 
         scene.update(0)
         scene.update(1)
@@ -165,6 +219,122 @@ struct LocalMultiplayerTests {
         #expect(!snapshotData.zombies.isEmpty)
         #expect(!snapshotData.chests.isEmpty)
         #expect(snapshotData.killCount == 0)
+        #expect(snapshotData.simulationTick == scene.authoritativeSimulationTick)
+        #expect(session.deliveryPolicies.contains(.replaceable))
+    }
+
+    @Test("Host transfers the current board immediately after accepting a late joiner")
+    @MainActor
+    func hostTransfersCurrentBoardToLateJoinerImmediately() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        scene.update(0)
+        scene.update(1)
+        scene.update(2)
+        scene.update(3)
+        session.connectedPeerIDs.insert("late-client")
+
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match", peerID: "late-client", startedAt: 9_999_999_999, protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match", peerID: "late-client", protocolVersion: 1
+        )).encoded(), from: "late-client")
+
+        let transferredBoard = try #require(session.sentData.compactMap { data -> MultiplayerBoardState? in
+            guard case let .boardSnapshot(board) = try? MultiplayerWireMessage.decode(data) else { return nil }
+            return board
+        }.last)
+
+
+        #expect(transferredBoard.hostID == "host")
+        #expect(transferredBoard.players.contains { $0.id == "host" })
+        #expect(!transferredBoard.chests.isEmpty)
+    }
+
+    @Test("Authoritative simulation is independent of render frame partitioning")
+    @MainActor
+    func authoritativeSimulationIsIndependentOfRenderFramePartitioning() throws {
+        let splitSession = FakeMultiplayerSession(localPlayerID: "host-split")
+        let splitScene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { splitSession }
+        )
+        let splitView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        splitScene.didMove(to: splitView)
+        splitScene.startLocalMultiplayer()
+        splitSession.connectedPeerIDs.insert("client")
+        splitSession.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "wasteland-survivors-local",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+        splitScene.update(0.001)
+        splitScene.update(0.001 + 1.0 / 120.0)
+        splitScene.update(0.001 + 2.0 / 120.0)
+
+        let wholeSession = FakeMultiplayerSession(localPlayerID: "host-whole")
+        let wholeScene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { wholeSession }
+        )
+        let wholeView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        wholeScene.didMove(to: wholeView)
+        wholeScene.startLocalMultiplayer()
+        wholeSession.connectedPeerIDs.insert("client")
+        wholeSession.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "wasteland-survivors-local",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+        wholeScene.update(0.001)
+        wholeScene.update(0.001 + 1.0 / 60.0)
+
+        #expect(splitScene.authoritativeSimulationTick > 0)
+        #expect(splitScene.authoritativeSimulationTick == wholeScene.authoritativeSimulationTick)
+        #expect(splitScene.playerNode.position == wholeScene.playerNode.position)
+    }
+
+    @Test("Restarting a multiplayer match resets authoritative tick state")
+    @MainActor
+    func restartingMultiplayerMatchResetsAuthoritativeTickState() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "wasteland-survivors-local",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+
+        scene.update(0.001)
+        scene.update(0.001 + 1.0 / 60.0)
+        #expect(scene.authoritativeSimulationTick == 1)
+
+        scene.restartGame()
+        scene.update(0.001)
+        scene.update(0.001 + 1.0 / 60.0)
+
+        #expect(scene.authoritativeSimulationTick == 1)
     }
 
     @Test("Client applies the host board snapshot to its real scene")
@@ -173,11 +343,18 @@ struct LocalMultiplayerTests {
         let session = FakeMultiplayerSession(localPlayerID: "client")
         let scene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
             multiplayerSessionFactory: { session }
         )
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
         scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
 
         let board = MultiplayerBoardState(
             hostID: "host",
@@ -188,7 +365,7 @@ struct LocalMultiplayerTests {
             zombies: [MultiplayerZombieState(id: "zombie-1", x: 40, y: 50, health: 45, rotation: 0)],
             chests: [MultiplayerChestState(id: "chest-1", x: 60, y: 70)],
             powerUps: [MultiplayerPowerUpState(id: "powerup-1", x: 80, y: 90, type: .damage)],
-            projectiles: [MultiplayerProjectileState(id: "projectile-1", x: 100, y: 110, angle: 0, weapon: .pistol, damage: 30)],
+            projectiles: [MultiplayerProjectileState(id: "projectile-1", ownerID: "host", x: 100, y: 110, angle: 0, weapon: .pistol, damage: 30)],
             killCount: 12
         )
 
@@ -204,6 +381,171 @@ struct LocalMultiplayerTests {
         #expect(scene.chests.count == 1)
         #expect(scene.powerUps.count == 1)
         #expect(scene.worldNode.children.contains { $0 is ProjectileNode })
+
+        // Full snapshots are replacement messages: omitting an entity is an
+        // authoritative removal, not an instruction to retain the old node.
+        let clearedBoard = MultiplayerBoardState(
+            sequence: 1,
+            simulationTick: 1,
+            hostID: "host",
+            players: board.players,
+            zombies: [],
+            chests: board.chests,
+            powerUps: board.powerUps,
+            projectiles: [],
+            killCount: board.killCount
+        )
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(clearedBoard).encoded())
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(scene.zombies.isEmpty)
+        #expect(scene.worldNode.children.contains { $0 is ProjectileNode } == false)
+    }
+
+    @Test("Client applies an authorized match-ended event to its presentation")
+    @MainActor
+    func clientAppliesMatchEndedGameplayEvent() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+        let event = MultiplayerGameplayEvent(
+            event: .matchEnded,
+            sessionID: "wasteland-survivors-local",
+            sequence: 1,
+            tick: 1,
+            hostID: "host"
+        )
+
+        session.deliver(try MultiplayerWireMessage.gameplayEvent(event).encoded(), from: "host")
+
+        #expect(scene.isGameOver)
+    }
+
+    @Test("Client presents game over when the authoritative host disconnects")
+    @MainActor
+    func clientPresentsGameOverOnHostLoss() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+
+        session.peerDisconnected("host")
+
+        #expect(scene.isGameOver)
+    }
+
+    @Test("Client reconciliation replays only inputs not acknowledged by the host")
+    @MainActor
+    func clientReconcilesUnacknowledgedPrediction() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+        scene.keysPressed.insert(13)
+        scene.update(0.001)
+        scene.update(0.001 + 1.0 / 60.0)
+
+        let board = MultiplayerBoardState(
+            sequence: 1, simulationTick: 0, hostID: "host",
+            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
+            zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
+            acknowledgedInputSequences: [:]
+        )
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded(), from: "host")
+
+        #expect(scene.playerNode.position.y > 0)
+    }
+
+    @Test("Client does not replay an input already acknowledged by the host")
+    @MainActor
+    func clientDropsAcknowledgedPrediction() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "wasteland-survivors-local",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+        scene.keysPressed.insert(13)
+        scene.update(0.001)
+        scene.update(0.001 + 1.0 / 60.0)
+
+        let board = MultiplayerBoardState(
+            sequence: 1, simulationTick: 0, hostID: "host",
+            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
+            zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
+            acknowledgedInputSequences: ["client": 1]
+        )
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded(), from: "host")
+
+        #expect(scene.playerNode.position == .zero)
+    }
+
+    @Test("Client preserves projectile node identity across snapshot updates")
+    @MainActor
+    func clientPreservesProjectileNodeIdentityAcrossSnapshots() async throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1)).encoded())
+
+        let first = MultiplayerBoardState(sequence: 1, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [MultiplayerProjectileState(id: "projectile", ownerID: "host", x: 10, y: 20, angle: 0, weapon: .pistol, damage: 30)], killCount: 0)
+        let second = MultiplayerBoardState(sequence: 2, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [MultiplayerProjectileState(id: "projectile", ownerID: "host", x: 30, y: 40, angle: 0.5, weapon: .pistol, damage: 30)], killCount: 0)
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(first).encoded())
+        try await Task.sleep(for: .milliseconds(20))
+        let projectile = try #require(scene.worldNode.children.compactMap { $0 as? ProjectileNode }.first)
+        session.deliver(try MultiplayerWireMessage.boardSnapshot(second).encoded())
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(scene.worldNode.children.compactMap { $0 as? ProjectileNode }.first === projectile)
+        #expect(projectile.position == CGPoint(x: 30, y: 40))
+    }
+
+    @Test("Rotation interpolation follows the shortest angular path")
+    func rotationInterpolationUsesShortestPath() {
+        let current = CGFloat.pi - 0.1
+        let target = -CGFloat.pi + 0.1
+
+        let next = MultiplayerInterpolation.angle(
+            current: current,
+            target: target,
+            deltaTime: 0.1,
+            responsiveness: 1
+        )
+
+        #expect(next > current)
+        #expect(next < CGFloat.pi + 0.2)
     }
 
     @Test("Interpolation moves toward the host target without teleporting")
@@ -239,6 +581,19 @@ struct LocalMultiplayerTests {
         #expect(hypot(position.x - target.x, position.y - target.y) < 0.1)
     }
 
+    @Test("Interpolation snaps large divergence while smoothing small correction")
+    func interpolationRecoversFromLargeDivergence() {
+        let small = MultiplayerInterpolation.position(
+            current: .zero, target: CGPoint(x: 20, y: 0), deltaTime: 1.0 / 60.0, responsiveness: 10
+        )
+        let large = MultiplayerInterpolation.position(
+            current: .zero, target: CGPoint(x: 1_000, y: 0), deltaTime: 1.0 / 60.0, responsiveness: 10
+        )
+
+        #expect(small.x > 0 && small.x < 20)
+        #expect(large == CGPoint(x: 1_000, y: 0))
+    }
+
     @Test("Player input round-trips with its sequence number")
     func playerInputRoundTrips() throws {
         let input = MultiplayerPlayerInput(
@@ -246,7 +601,9 @@ struct LocalMultiplayerTests {
             sequence: 17,
             movement: CGVector(dx: 1, dy: -1),
             aimAngle: 0.75,
-            wantsToAttack: true
+            wantsToAttack: true,
+            wantsToOpenChestID: "chest-1",
+            wantsToCollectPowerUpID: "power-up-1"
         )
 
         let decoded = try MultiplayerWireMessage.decode(
@@ -254,6 +611,160 @@ struct LocalMultiplayerTests {
         )
 
         #expect(decoded == .playerInput(input))
+    }
+
+    @Test("A multiplayer client publishes intent instead of authoritative player state")
+    @MainActor
+    func clientPublishesIntentInsteadOfPlayerState() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match", hostID: "host", hostStartedAt: 1, protocolVersion: 1
+        )).encoded())
+        let chest = try #require(scene.chests.first)
+        scene.openChest(chest)
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        scene.update(0.001)
+        scene.update(0.2)
+
+        let messages = session.sentData.compactMap { try? MultiplayerWireMessage.decode($0) }
+        let input = try #require(messages.compactMap { message -> MultiplayerPlayerInput? in
+            guard case let .playerInput(input) = message else { return nil }
+            return input
+        }.last)
+        #expect(input.wantsToOpenChestID == chest.multiplayerID)
+        #expect(!messages.contains {
+            if case .playerUpdate = $0 { return true }
+            return false
+        })
+    }
+
+    @Test("Reliable gameplay events round-trip every event field and use reliable delivery")
+    func gameplayEventRoundTripsWithReliableDelivery() throws {
+        let replicated = MultiplayerGameplayEvent(
+            event: .chestOpened(id: "chest-event", playerID: "client", weapon: .rifle),
+            sessionID: "match",
+            sequence: 9,
+            tick: 42,
+            hostID: "host"
+        )
+        let message = MultiplayerWireMessage.gameplayEvent(replicated)
+
+        #expect(try MultiplayerWireMessage.decode(message.encoded()) == message)
+        #expect(message.deliveryPolicy == .reliable)
+    }
+
+    @Test("Every supported gameplay event preserves its payload over the wire")
+    func everyGameplayEventRoundTrips() throws {
+        let events: [GameplayEvent] = [
+            .projectileSpawned(id: "projectile", ownerID: "host"),
+            .meleeAttack(id: "attack", ownerID: "host"),
+            .zombieDamaged(id: "zombie", amount: 4),
+            .zombieKilled(id: "zombie", ownerID: "host"),
+            .chestOpened(id: "chest", playerID: "client", weapon: .rifle),
+            .powerUpCollected(id: "powerup", playerID: "client", type: .range),
+            .playerDamaged(id: "client", amount: 3),
+            .playerEliminated(id: "client"),
+            .matchEnded
+        ]
+
+        for (index, event) in events.enumerated() {
+            let envelope = MultiplayerGameplayEvent(
+                event: event, sessionID: "match", sequence: UInt64(index + 1), tick: UInt64(index + 1), hostID: "host"
+            )
+            let message = MultiplayerWireMessage.gameplayEvent(envelope)
+            #expect(try MultiplayerWireMessage.decode(message.encoded()) == message)
+        }
+    }
+
+    @Test("Gameplay events reject a foreign host identity")
+    func gameplayEventRejectsForeignHost() throws {
+        let event = MultiplayerGameplayEvent(
+            event: .matchEnded,
+            sessionID: "match",
+            sequence: 1,
+            tick: 2,
+            hostID: "attacker"
+        )
+
+        #expect(throws: ReplicationError.unauthorizedOwner) {
+            try event.validate(expectedHostID: "host")
+        }
+    }
+
+    @Test("Gameplay events reject impossible semantic payloads")
+    func gameplayEventRejectsImpossiblePayloads() {
+        let invalidDamage = MultiplayerGameplayEvent(
+            event: .zombieDamaged(id: "zombie-1", amount: -1),
+            sessionID: "match",
+            sequence: 1,
+            tick: 1,
+            hostID: "host"
+        )
+
+        #expect(throws: ReplicationError.malformedPayload) {
+            try invalidDamage.validate(expectedHostID: "host")
+        }
+    }
+
+    @Test("Gameplay events reject replay from a different session")
+    func gameplayEventRejectsDifferentSession() {
+        let event = MultiplayerGameplayEvent(
+            event: .matchEnded,
+            sessionID: "old-match",
+            sequence: 1,
+            tick: 1,
+            hostID: "host"
+        )
+
+        #expect(throws: ReplicationError.unauthorizedOwner) {
+            try event.validate(expectedHostID: "host", expectedSessionID: "current-match")
+        }
+    }
+
+    @Test("Gameplay events reject zero sequence or simulation tick")
+    func gameplayEventRejectsMissingOrderingMetadata() {
+        let zeroSequence = MultiplayerGameplayEvent(
+            event: .matchEnded,
+            sessionID: "match",
+            sequence: 0,
+            tick: 1,
+            hostID: "host"
+        )
+        let zeroTick = MultiplayerGameplayEvent(
+            event: .matchEnded,
+            sessionID: "match",
+            sequence: 1,
+            tick: 0,
+            hostID: "host"
+        )
+
+        #expect(throws: ReplicationError.malformedPayload) {
+            try zeroSequence.validate(expectedHostID: "host", expectedSessionID: "match")
+        }
+        #expect(throws: ReplicationError.malformedPayload) {
+            try zeroTick.validate(expectedHostID: "host", expectedSessionID: "match")
+        }
+    }
+
+    @Test("Snapshot buffer inserts delayed snapshots in sequence order")
+    func snapshotBufferInsertsDelayedSnapshots() {
+        var buffer = MultiplayerSnapshotBuffer(capacity: 3)
+        for sequence in [1, 3, 2] {
+            let accepted = buffer.append(MultiplayerBoardState.empty(hostID: "host", sequence: UInt64(sequence)))
+            #expect(accepted)
+        }
+
+        #expect(buffer.snapshots.map { $0.sequence } == [1, 2, 3])
+        let acceptedDuplicate = buffer.append(MultiplayerBoardState.empty(hostID: "host", sequence: 2))
+        #expect(!acceptedDuplicate)
     }
 
     @Test("Snapshot buffer rejects stale snapshots")
@@ -270,14 +781,66 @@ struct LocalMultiplayerTests {
         #expect(buffer.latest?.sequence == 10)
     }
 
+    @Test("Snapshot interpolation lookup uses simulation ticks rather than packet sequences")
+    func snapshotBufferUsesSimulationTicksForSurroundingSnapshots() {
+        var buffer = MultiplayerSnapshotBuffer()
+        let before = MultiplayerBoardState(sequence: 100, simulationTick: 10, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        let after = MultiplayerBoardState(sequence: 200, simulationTick: 20, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        _ = buffer.append(before)
+        _ = buffer.append(after)
+
+        let surrounding = buffer.surrounding(tick: 15)
+
+        #expect(surrounding?.before == before)
+        #expect(surrounding?.after == after)
+    }
+
+    @Test("Snapshot interpolation remains correct when sequence and tick order differ")
+    func snapshotBufferOrdersInterpolationBySimulationTick() {
+        var buffer = MultiplayerSnapshotBuffer(capacity: 4)
+        let lateTick = MultiplayerBoardState(sequence: 1, simulationTick: 20, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        let earlyTick = MultiplayerBoardState(sequence: 2, simulationTick: 10, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        let acceptedLateTick = buffer.append(lateTick)
+        let acceptedEarlyTick = buffer.append(earlyTick)
+        #expect(acceptedLateTick)
+        #expect(acceptedEarlyTick)
+
+        let surrounding = buffer.surrounding(tick: 15)
+
+        #expect(surrounding?.before == earlyTick)
+        #expect(surrounding?.after == lateTick)
+    }
+
+    @Test("Snapshot buffer samples with an explicit delay and bounded extrapolation")
+    func snapshotBufferSamplesDelayedAndBounded() {
+        var buffer = MultiplayerSnapshotBuffer(capacity: 4)
+        let first = MultiplayerBoardState(sequence: 1, simulationTick: 10, hostID: "host", players: [
+            MultiplayerPlayerState(id: "player", position: CGPoint(x: 0, y: 0), color: .blue)
+        ], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        let second = MultiplayerBoardState(sequence: 2, simulationTick: 20, hostID: "host", players: [
+            MultiplayerPlayerState(id: "player", position: CGPoint(x: 100, y: 0), color: .blue)
+        ], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
+        _ = buffer.append(first)
+        _ = buffer.append(second)
+
+        #expect(buffer.position(for: "player", renderTick: 25, delayTicks: 5, maxExtrapolationTicks: 3) == CGPoint(x: 100, y: 0))
+        #expect(buffer.position(for: "player", renderTick: 20, delayTicks: 5, maxExtrapolationTicks: 3) == CGPoint(x: 50, y: 0))
+    }
+
     @Test("Client ignores snapshots from a different host")
     @MainActor
     func clientIgnoresSnapshotsFromDifferentHost() async throws {
         let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionFactory: { session })
+        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
         scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "wasteland-survivors-local",
+            hostID: "host-a",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
 
         let first = MultiplayerBoardState.empty(hostID: "host-a", sequence: 1)
         let second = MultiplayerBoardState(sequence: 2, hostID: "host-b", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 99)
@@ -314,11 +877,11 @@ struct LocalMultiplayerTests {
         #expect(MultiplayerSnapshotEntityIDs.projectile(projectile) == projectile.multiplayerID)
     }
 
-    @Test("Host reflects client movement through the remote player target")
+    @Test("Host does not reflect legacy client player updates")
     @MainActor
-    func hostReflectsClientMovement() async throws {
+    func hostDoesNotReflectClientPlayerUpdates() async throws {
         let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionFactory: { session })
+        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
         scene.startLocalMultiplayer()
@@ -333,8 +896,24 @@ struct LocalMultiplayerTests {
         try await Task.sleep(for: .milliseconds(50))
         scene.update(1.016)
 
-        let reflectedX = try #require(scene.remotePlayers["client"]?.position.x)
-        #expect(reflectedX > 10)
-        #expect(reflectedX < 100)
+        #expect(scene.remotePlayers["client"] == nil)
+    }
+
+    @Test("MultipeerConnectivity uses the transport identity in peer callbacks")
+    func multipeerConnectivityUsesTransportIdentityInPeerCallbacks() {
+        let session = MultipeerConnectivitySession(playerName: "Test Player")
+
+        #expect(session.peerDisplayName == session.localPeerID)
+    }
+
+    @Test("MultipeerConnectivity remains connecting until a peer actually connects")
+    func multipeerConnectivityDoesNotReportPrematureConnection() {
+        let session = MultipeerConnectivitySession(playerName: "Test Player")
+
+        session.connect()
+        defer { session.disconnect() }
+
+        #expect(session.state == .connecting)
+        #expect(session.connectedPeerIDs.isEmpty)
     }
 }

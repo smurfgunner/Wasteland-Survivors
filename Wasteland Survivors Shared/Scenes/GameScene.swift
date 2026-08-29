@@ -31,23 +31,28 @@ final class GameScene: SKScene {
     let cameraNode = SKCameraNode()
     let hudManager = HUDManager()
     let combatSystem = CombatSystem()
-    private let movePlayerUseCase = MovePlayerUseCase()
-    private let updateEnemyBehaviorUseCase = UpdateEnemyBehaviorUseCase()
     private let randomSource: RandomSource
     private let clock: (TimeInterval) -> TimeInterval
     private let selectWeaponRewardUseCase: SelectWeaponRewardUseCase
     private let selectPowerUpDropUseCase: SelectPowerUpDropUseCase
     private let effectsRenderer: GameEffectsRenderer
-    private let multiplayerSessionFactory: () -> LocalMultiplayerNetworkSession?
+    private let multiplayerSessionFactory: () -> MultiplayerTransport?
+    let multiplayerSessionID: String
     
     private(set) var playerNode: PlayerNode!
     private(set) var zombies: [ZombieNode] = []
     private(set) var chests: [ChestNode] = []
     private(set) var powerUps: [PowerUpNode] = []
     private(set) var remotePlayers: [String: PlayerNode] = [:]
-    private var localMultiplayerSession: LocalMultiplayerNetworkSession?
+    private var multiplayerTransport: MultiplayerTransport?
+    private var multiplayerCoordinator: MultiplayerSessionCoordinator?
     private var multiplayerColor: MultiplayerPlayerColor = .blue
     private var lastMultiplayerSyncTime: TimeInterval = 0
+    private var hasReceivedFirstUpdate = false
+    private var localInputSequence: UInt64 = 0
+    private var gameplayEventSequence: UInt64 = 0
+    private var pendingChestInteractionID: String?
+    private var pendingPowerUpInteractionID: String?
     private var hasSpawnedNearHost = false
     private var knownPlayerStates: [String: MultiplayerPlayerState] = [:]
     private var hostID: String?
@@ -56,10 +61,21 @@ final class GameScene: SKScene {
     private var initializedMultiplayerTargets: Set<String> = []
     private var multiplayerSnapshotSequence: UInt64 = 0
     private var receivedSnapshotBuffer = MultiplayerSnapshotBuffer()
+    private var multiplayerRenderTick: Double = 0
+    private var authoritativeGameState: GameState?
+    private var authoritativeSimulationDriver: FixedTickSimulationDriver?
+    private var offlineSimulationDriver: FixedTickSimulationDriver?
+    private var clientPredictionDriver: FixedTickSimulationDriver?
+    private var clientPredictionHistory = LocalPredictionInputHistory()
+    private var latestLocalPlayerInput: PlayerInput?
+    var authoritativeSimulationTick: UInt64 { authoritativeGameState?.tick ?? 0 }
     private var acceptedHostID: String?
     private var isMultiplayerClient: Bool {
-        guard localMultiplayerSession != nil else { return false }
-        return hostID != nil && hostID != localMultiplayerSession?.localPlayerID
+        multiplayerCoordinator?.role == .client
+    }
+
+    private var isAuthoritativeMultiplayerHost: Bool {
+        multiplayerCoordinator?.role == .host
     }
     
     // MARK: - State & Controls
@@ -76,22 +92,16 @@ final class GameScene: SKScene {
     var isJoystickActive: Bool = false
     var joystickTouchOrigin: CGPoint = .zero
     
-    // Timers & Balancing
+    // Frame clock and initial presentation content
     private var lastUpdateTime: TimeInterval = 0
-    private var lastZombieSpawnTime: TimeInterval = 0
-    private let initialZombieSpawnInterval: TimeInterval = 2.0 / 3.0
-    private let minimumZombieSpawnInterval: TimeInterval = 0.8 / 3.0
-    private var zombieSpawnInterval: TimeInterval = 2.0 / 3.0
-    private var lastChestSpawnTime: TimeInterval = 0
-    private var chestSpawnInterval: TimeInterval = 8.0
-    private let maxZombies: Int = 18
     private let maxChests: Int = 8
     
     init(
         size: CGSize,
         randomSource: RandomSource = SystemRandomSource(),
         clock: @escaping (TimeInterval) -> TimeInterval = { $0 },
-        multiplayerSessionFactory: @escaping () -> LocalMultiplayerNetworkSession? = {
+        multiplayerSessionID: String = UUID().uuidString,
+        multiplayerSessionFactory: @escaping () -> MultiplayerTransport? = {
             #if canImport(MultipeerConnectivity)
             return MultipeerConnectivitySession()
             #else
@@ -101,6 +111,7 @@ final class GameScene: SKScene {
     ) {
         self.randomSource = randomSource
         self.clock = clock
+        self.multiplayerSessionID = multiplayerSessionID
         self.multiplayerSessionFactory = multiplayerSessionFactory
         selectWeaponRewardUseCase = SelectWeaponRewardUseCase(randomSource: randomSource)
         selectPowerUpDropUseCase = SelectPowerUpDropUseCase(randomSource: randomSource)
@@ -112,6 +123,7 @@ final class GameScene: SKScene {
         let randomSource = SystemRandomSource()
         self.randomSource = randomSource
         self.clock = { $0 }
+        self.multiplayerSessionID = UUID().uuidString
         self.multiplayerSessionFactory = {
             #if canImport(MultipeerConnectivity)
             return MultipeerConnectivitySession()
@@ -130,7 +142,8 @@ final class GameScene: SKScene {
         size: CGSize,
         randomSource: RandomSource = SystemRandomSource(),
         clock: @escaping (TimeInterval) -> TimeInterval = { $0 },
-        multiplayerSessionFactory: @escaping () -> LocalMultiplayerNetworkSession? = {
+        multiplayerSessionID: String = UUID().uuidString,
+        multiplayerSessionFactory: @escaping () -> MultiplayerTransport? = {
             #if canImport(MultipeerConnectivity)
             return MultipeerConnectivitySession()
             #else
@@ -139,7 +152,7 @@ final class GameScene: SKScene {
         }
     ) -> GameScene {
         let sceneSize = size.width > 0 && size.height > 0 ? size : CGSize(width: 1024, height: 768)
-        let scene = GameScene(size: sceneSize, randomSource: randomSource, clock: clock, multiplayerSessionFactory: multiplayerSessionFactory)
+        let scene = GameScene(size: sceneSize, randomSource: randomSource, clock: clock, multiplayerSessionID: multiplayerSessionID, multiplayerSessionFactory: multiplayerSessionFactory)
         scene.scaleMode = .resizeFill
         return scene
     }
@@ -152,6 +165,19 @@ final class GameScene: SKScene {
         setupPlayer()
         setupWastelandTerrain()
         spawnInitialChests()
+        let offlineState = GameSceneStateAdapter.gameState(
+            localPlayer: playerNode,
+            remotePlayers: remotePlayers,
+            zombies: zombies,
+            chests: chests,
+            powerUps: powerUps,
+            projectiles: worldNode.children.compactMap { $0 as? ProjectileNode },
+            localPlayerID: "offline-player",
+            seed: 0,
+            tick: 0,
+            score: killCount
+        )
+        offlineSimulationDriver = FixedTickSimulationDriver(initialState: offlineState)
         setupMainMenu()
     }
 
@@ -206,8 +232,35 @@ final class GameScene: SKScene {
 
     private func setupLocalMultiplayer() {
         guard let session = multiplayerSessionFactory() else { return }
-        session.delegate = self
-        localMultiplayerSession = session
+        multiplayerTransport = session
+
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: multiplayerSessionID,
+            startedAt: Date().timeIntervalSince1970
+        )
+        coordinator.onRoleChanged = { [weak self] role in
+            guard let self else { return }
+            switch role {
+            case .host:
+                self.hostID = session.localPeerID
+            case .client:
+                self.hostID = self.multiplayerCoordinator?.hostID
+            default:
+                break
+            }
+        }
+        coordinator.onMessage = { [weak self] message in
+            self?.handleMultiplayerMessage(message)
+        }
+        coordinator.onPeerJoined = { [weak self] _ in
+            guard let self, let transport = self.multiplayerTransport else { return }
+            self.sendBoardSnapshot(using: transport)
+        }
+        coordinator.onHostLost = { [weak self] _ in
+            self?.triggerGameOver()
+        }
+        multiplayerCoordinator = coordinator
     }
     
     private func setupWastelandTerrain() {
@@ -263,30 +316,12 @@ final class GameScene: SKScene {
         chests.append(chest)
     }
     
-    private func spawnZombieOffscreen() {
-        guard zombies.count < maxZombies, !isGameOver else { return }
-        
-        let angle = randomSource.nextCGFloat(in: 0...(CGFloat.pi * 2))
-        let spawnDist: CGFloat = Swift.max(size.width, size.height) * 0.7 + randomSource.nextCGFloat(in: 50...150)
-        let pos = CGPoint(
-            x: playerNode.position.x + cos(angle) * spawnDist,
-            y: playerNode.position.y + sin(angle) * spawnDist
-        )
-        
-        let zombie = ZombieNode(randomSource: randomSource)
-        zombie.position = pos
-        zombie.zPosition = 8
-        worldNode.addChild(zombie)
-        zombies.append(zombie)
-    }
-    
     // MARK: - Game Loop
     override func update(_ currentTime: TimeInterval) {
         let gameTime = clock(currentTime)
-        if lastUpdateTime == 0 {
+        if !hasReceivedFirstUpdate {
+            hasReceivedFirstUpdate = true
             lastUpdateTime = gameTime
-            lastZombieSpawnTime = gameTime
-            lastChestSpawnTime = gameTime
             return
         }
         
@@ -296,92 +331,234 @@ final class GameScene: SKScene {
         guard menuState == .playing, !isGameOver else { return }
         
         // 1. Player Movement & Camera
-        updatePlayerMovement(dt: dt)
-        cameraNode.position = playerNode.position
-        
-        // 2. Health regeneration
-        if playerNode.updateHealth(deltaTime: dt) {
-            hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        if isAuthoritativeMultiplayerHost, authoritativeGameState != nil {
+            advanceAuthoritativePlayerMovement(dt: dt)
+        } else if isMultiplayerClient {
+            advanceClientPrediction(dt: dt)
+        } else {
+            advanceOfflineSimulation(dt: dt)
         }
-        
-        syncLocalPlayerIfNeeded(at: gameTime)
-        interpolateMultiplayerNodes(dt: dt)
+        cameraNode.position = playerNode.position
 
-        if isMultiplayerClient {
-            cameraNode.position = playerNode.position
+        if !isAuthoritativeMultiplayerHost && !isMultiplayerClient {
+            interpolateMultiplayerNodes(dt: dt)
             return
         }
 
-        // 3. Zombies AI and board simulation run only on the elected host.
-        updateZombies(dt: dt, currentTime: gameTime)
-        // 4. Auto-Combat
-        guard let localPlayer = playerNode else { return }
-        for player in [localPlayer] + Array(remotePlayers.values) {
-            combatSystem.updateAutoCombat(
-                player: player,
-                zombies: zombies,
-                world: worldNode,
-                currentTime: gameTime,
-                onDamageZombie: { [weak self] zombie, damage in
-                    self?.damageZombie(zombie, amount: damage)
-                }
-            )
-        }
-        
-        // 5. Spawners
-        handleSpawning(currentTime: gameTime)
-        
-        // 6. Cleanup
-        zombies.removeAll { $0.isDead && $0.parent == nil }
-        chests.removeAll { $0.isOpened && $0.parent == nil }
-        powerUps.removeAll { $0.parent == nil }
+        // Fixed-tick simulation and snapshot rendering own all gameplay state.
+        syncLocalPlayerIfNeeded(at: gameTime)
+        interpolateMultiplayerNodes(dt: dt)
     }
-    
-    private func updatePlayerMovement(dt: TimeInterval) {
+
+    private func advanceOfflineSimulation(dt: TimeInterval) {
+        guard var driver = offlineSimulationDriver else { return }
+        synchronizeOfflinePresentationMutations(&driver)
+        let input = PlayerInput(
+            playerID: "offline-player",
+            sequence: driver.state.tick &+ 1,
+            movement: CGPointValue(currentMovementDirection()),
+            aimAngle: Double(playerNode.zRotation),
+            wantsToAttack: true
+        )
+        let steps = driver.advance(elapsedTime: dt, inputs: [input])
+        offlineSimulationDriver = driver
+        guard let state = steps.last else { return }
+        authoritativeGameState = state.state
+        applyOfflineStateToScene(state.state)
+    }
+
+    /// Keeps the legacy node-facing helpers usable while the fixed-tick state
+    /// remains the source of truth for the offline game loop. These are only
+    /// compatibility inputs; normal gameplay changes enter through simulation
+    /// inputs and are rendered back into nodes below.
+    private func synchronizeOfflinePresentationMutations(_ driver: inout FixedTickSimulationDriver) {
+        var state = driver.state
+        guard let playerIndex = state.players.firstIndex(where: { $0.id == "offline-player" }) else { return }
+        state.players[playerIndex].position = CGPointValue(x: Double(playerNode.position.x), y: Double(playerNode.position.y))
+        state.players[playerIndex].rotation = Double(playerNode.zRotation)
+        state.players[playerIndex].health = Double(playerNode.currentHealth)
+        state.players[playerIndex].weapon = playerNode.currentWeapon
+
+        let zombieNodes = Dictionary(uniqueKeysWithValues: zombies.map { ($0.multiplayerID, $0) })
+        state.zombies.removeAll { zombie in
+            guard let node = zombieNodes[zombie.id] else { return true }
+            guard node.parent != nil else { return true }
+            return node.isDead
+        }
+        for index in state.zombies.indices {
+            guard let node = zombieNodes[state.zombies[index].id] else { continue }
+            state.zombies[index].position = CGPointValue(x: Double(node.position.x), y: Double(node.position.y))
+            state.zombies[index].rotation = Double(node.zRotation)
+            state.zombies[index].health = Double(node.health)
+        }
+
+        let chestNodes = Dictionary(uniqueKeysWithValues: chests.map { ($0.multiplayerID, $0) })
+        state.chests.removeAll { chest in
+            guard let node = chestNodes[chest.id] else { return true }
+            return node.parent == nil
+        }
+        for index in state.chests.indices {
+            if let node = chestNodes[state.chests[index].id] {
+                state.chests[index].isOpened = node.isOpened
+            }
+        }
+
+        let powerUpIDs = Set(powerUps.filter { $0.parent != nil }.map(\.multiplayerID))
+        state.powerUps.removeAll { !powerUpIDs.contains($0.id) }
+        driver.replaceState(state)
+    }
+
+    private func applyOfflineStateToScene(_ state: GameState) {
+        let board = GameStateMultiplayerMapper.boardState(
+            from: state,
+            sequence: state.tick,
+            timestamp: 0,
+            hostID: "offline-player",
+            playerColors: ["offline-player": .blue],
+            sessionStartTimes: [:]
+        )
+        guard let localPlayerState = board.players.first else { return }
+        playerNode.position = localPlayerState.position
+        playerNode.zRotation = localPlayerState.rotation
+        playerNode.apply(multiplayerState: localPlayerState)
+        killCount = board.killCount
+        isGameOver = board.isGameOver
+        hudManager.updateKillCount(killCount)
+        hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        hudManager.updateWeapon(
+            weapon: playerNode.currentWeapon,
+            damage: playerNode.currentWeaponDamage,
+            range: playerNode.currentWeaponRange,
+            fireRate: playerNode.currentWeaponFireRate
+        )
+        reconcileZombies(board.zombies)
+        reconcileChests(board.chests)
+        reconcilePowerUps(board.powerUps)
+        reconcileProjectiles(board.projectiles)
+    }
+
+    private func advanceClientPrediction(dt: TimeInterval) {
+        guard var driver = clientPredictionDriver,
+              let session = multiplayerTransport else { return }
+        localInputSequence &+= 1
+        let input = PlayerInput(
+            playerID: session.localPeerID,
+            sequence: localInputSequence,
+            movement: CGPointValue(currentMovementDirection()),
+            aimAngle: Double(playerNode.zRotation),
+            wantsToAttack: true
+        )
+        latestLocalPlayerInput = input
+        clientPredictionHistory.record(input)
+        let steps = driver.advance(elapsedTime: dt, inputs: [input])
+        clientPredictionDriver = driver
+        guard let state = steps.last,
+              let localPlayer = state.state.players.first(where: { $0.id == session.localPeerID }) else { return }
+        playerNode.position = localPlayer.position.cgPoint
+        playerNode.zRotation = CGFloat(localPlayer.rotation)
+    }
+
+    private func currentMovementDirection() -> CGVector {
         var direction = movementVector
-        
+
         #if os(macOS)
         var dx: CGFloat = 0
         var dy: CGFloat = 0
         if keysPressed.contains(13) || keysPressed.contains(126) { dy += 1 }
-        if keysPressed.contains(1)  || keysPressed.contains(125) { dy -= 1 }
-        if keysPressed.contains(0)  || keysPressed.contains(123) { dx -= 1 }
-        if keysPressed.contains(2)  || keysPressed.contains(124) { dx += 1 }
-        
+        if keysPressed.contains(1) || keysPressed.contains(125) { dy -= 1 }
+        if keysPressed.contains(0) || keysPressed.contains(123) { dx -= 1 }
+        if keysPressed.contains(2) || keysPressed.contains(124) { dx += 1 }
+
         if dx != 0 || dy != 0 {
             let length = sqrt(dx * dx + dy * dy)
             direction = CGVector(dx: dx / length, dy: dy / length)
         }
         #endif
-        
-        movePlayerUseCase.execute(player: playerNode, direction: direction, deltaTime: dt)
+
+        return direction
     }
-    
-    private func updateZombies(dt: TimeInterval, currentTime: TimeInterval) {
-        guard let localPlayer = playerNode else { return }
-        let players = [localPlayer] + Array(remotePlayers.values)
-        updateEnemyBehaviorUseCase.execute(
-            zombies: zombies,
-            players: players,
-            deltaTime: dt,
-            currentTime: currentTime,
-            onPlayerDamage: { [weak self] player, amount in
-                self?.playerTakeDamage(amount: amount, player: player)
-            }
-        )
-    }
-    
-    private func handleSpawning(currentTime: TimeInterval) {
-        if currentTime - lastZombieSpawnTime > zombieSpawnInterval {
-            lastZombieSpawnTime = currentTime
-            spawnZombieOffscreen()
-            zombieSpawnInterval = Swift.max(minimumZombieSpawnInterval, zombieSpawnInterval - 0.01)
+
+    private func advanceAuthoritativePlayerMovement(dt: TimeInterval) {
+        guard var driver = authoritativeSimulationDriver,
+              let session = multiplayerTransport,
+              driver.state.players.contains(where: { $0.id == session.localPeerID }) else {
+            return
         }
-        
-        if currentTime - lastChestSpawnTime > chestSpawnInterval {
-            lastChestSpawnTime = currentTime
-            if chests.count < maxChests {
-                spawnChest(near: playerNode.position, radius: CGFloat.random(in: 400...1100))
+
+        var inputs = [PlayerInput(
+            playerID: session.localPeerID,
+            sequence: driver.state.tick &+ 1,
+            movement: CGPointValue(currentMovementDirection()),
+            aimAngle: Double(playerNode.zRotation),
+            wantsToAttack: true
+        )]
+        if let multiplayerCoordinator {
+            inputs.append(contentsOf: multiplayerCoordinator.consumeQueuedInputs().map {
+                PlayerInput(
+                    playerID: $0.playerID,
+                    sequence: $0.sequence,
+                    movement: CGPointValue($0.movement),
+                    aimAngle: $0.aimAngle,
+                    wantsToAttack: $0.wantsToAttack,
+                    wantsToOpenChestID: $0.wantsToOpenChestID,
+                    wantsToCollectPowerUpID: $0.wantsToCollectPowerUpID
+                )
+            })
+        }
+
+        let steps = driver.advance(elapsedTime: dt, inputs: inputs)
+        authoritativeSimulationDriver = driver
+        for step in steps {
+            for event in step.events {
+                gameplayEventSequence &+= 1
+                multiplayerCoordinator?.broadcastGameplayEvent(
+                    event,
+                    sequence: gameplayEventSequence,
+                    tick: step.state.tick
+                )
+            }
+        }
+        guard let state = steps.last else { return }
+        authoritativeGameState = state.state
+        applyAuthoritativeStateToScene(state.state, session: session)
+    }
+
+    private func applyAuthoritativeStateToScene(_ state: GameState, session: MultiplayerTransport) {
+        guard let localPlayerState = state.players.first(where: { $0.id == session.localPeerID }) else { return }
+        playerNode.position = localPlayerState.position.cgPoint
+        playerNode.zRotation = CGFloat(localPlayerState.rotation)
+        killCount = state.score
+        hudManager.updateKillCount(killCount)
+
+        let board = GameStateMultiplayerMapper.boardState(
+            from: state,
+            sequence: state.tick,
+            timestamp: 0,
+            hostID: session.localPeerID,
+            playerColors: knownPlayerStates.mapValues(\.color),
+            sessionStartTimes: knownPlayerStates.mapValues(\.sessionStartedAt)
+        )
+        if let localBoardState = board.players.first(where: { $0.id == session.localPeerID }) {
+            playerNode.apply(multiplayerState: localBoardState)
+            hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
+        }
+        reconcileZombies(board.zombies)
+        reconcileChests(board.chests)
+        reconcilePowerUps(board.powerUps)
+        reconcileProjectiles(board.projectiles)
+        for zombie in zombies {
+            if let state = board.zombies.first(where: { $0.id == zombie.multiplayerID }) {
+                zombie.position = CGPoint(x: state.x, y: state.y)
+            }
+        }
+        for chest in chests {
+            if let state = board.chests.first(where: { $0.id == chest.multiplayerID }) {
+                chest.position = CGPoint(x: state.x, y: state.y)
+            }
+        }
+        for powerUp in powerUps {
+            if let state = board.powerUps.first(where: { $0.id == powerUp.multiplayerID }) {
+                powerUp.position = CGPoint(x: state.x, y: state.y)
             }
         }
     }
@@ -413,6 +590,10 @@ final class GameScene: SKScene {
     }
 
     func collectPowerUp(_ powerUp: PowerUpNode) {
+        if isMultiplayerClient {
+            pendingPowerUpInteractionID = powerUp.multiplayerID
+            return
+        }
         guard playerNode.apply(powerUp: powerUp.powerUp) else { return }
 
         powerUp.removeFromParent()
@@ -443,6 +624,10 @@ final class GameScene: SKScene {
     
     // MARK: - Chest Opening
     func openChest(_ chest: ChestNode) {
+        if isMultiplayerClient {
+            pendingChestInteractionID = chest.multiplayerID
+            return
+        }
         chest.open()
         
         let newWeapon = selectWeaponRewardUseCase.execute(excluding: playerNode.currentWeapon)
@@ -666,12 +851,59 @@ final class GameScene: SKScene {
         hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
         hudManager.updateWeapon(weapon: playerNode.currentWeapon)
         
-        zombieSpawnInterval = initialZombieSpawnInterval
         isGameOver = false
         hasStartedGame = true
         menuState = .playing
-        
+        lastUpdateTime = 0
+        hasReceivedFirstUpdate = false
+        lastMultiplayerSyncTime = 0
+        multiplayerSnapshotSequence = 0
+        multiplayerTargetPositions.removeAll()
+        initializedMultiplayerTargets.removeAll()
+        receivedSnapshotBuffer = MultiplayerSnapshotBuffer()
+        multiplayerRenderTick = 0
+        authoritativeGameState = nil
+        authoritativeSimulationDriver = nil
+        offlineSimulationDriver = nil
+        clientPredictionDriver = nil
+        clientPredictionHistory = LocalPredictionInputHistory()
+        latestLocalPlayerInput = nil
+        localInputSequence = 0
+        gameplayEventSequence = 0
+        pendingChestInteractionID = nil
+        pendingPowerUpInteractionID = nil
+
         spawnInitialChests()
+        if let session = multiplayerTransport {
+            let resetState = GameSceneStateAdapter.gameState(
+                localPlayer: playerNode,
+                remotePlayers: remotePlayers,
+                zombies: zombies,
+                chests: chests,
+                powerUps: powerUps,
+                projectiles: worldNode.children.compactMap { $0 as? ProjectileNode },
+                localPlayerID: session.localPeerID,
+                seed: 0,
+                tick: 0,
+                score: killCount
+            )
+            authoritativeGameState = resetState
+            authoritativeSimulationDriver = FixedTickSimulationDriver(initialState: resetState)
+        } else {
+            let resetState = GameSceneStateAdapter.gameState(
+                localPlayer: playerNode,
+                remotePlayers: remotePlayers,
+                zombies: zombies,
+                chests: chests,
+                powerUps: powerUps,
+                projectiles: worldNode.children.compactMap { $0 as? ProjectileNode },
+                localPlayerID: "offline-player",
+                seed: 0,
+                tick: 0,
+                score: killCount
+            )
+            offlineSimulationDriver = FixedTickSimulationDriver(initialState: resetState)
+        }
     }
 
     func startLocalMultiplayer() {
@@ -680,25 +912,45 @@ final class GameScene: SKScene {
         playerNode.apply(multiplayerColor: multiplayerColor)
         knownPlayerStates.removeAll()
         acceptedHostID = nil
-        if let session = localMultiplayerSession {
-            hostID = session.localPlayerID
-        }
-        if localMultiplayerSession == nil {
+        if multiplayerTransport == nil {
             setupLocalMultiplayer()
         }
-        if let session = localMultiplayerSession as? MultipeerConnectivitySession {
+        if let session = multiplayerTransport as? MultipeerConnectivitySession {
             localSessionStartedAt = session.sessionStartedAt
         }
-        localMultiplayerSession?.start()
+        guard let session = multiplayerTransport else {
+            startGame()
+            return
+        }
+        let initialState = GameSceneStateAdapter.gameState(
+            localPlayer: playerNode,
+            remotePlayers: remotePlayers,
+            zombies: zombies,
+            chests: chests,
+            powerUps: powerUps,
+            projectiles: worldNode.children.compactMap { $0 as? ProjectileNode },
+            localPlayerID: session.localPeerID,
+            seed: 0,
+            tick: 0,
+            score: killCount
+        )
+        authoritativeGameState = initialState
+        authoritativeSimulationDriver = FixedTickSimulationDriver(initialState: initialState)
+        clientPredictionDriver = FixedTickSimulationDriver(initialState: initialState)
+        if let multiplayerCoordinator {
+            multiplayerCoordinator.start()
+        } else {
+            multiplayerTransport?.connect()
+        }
         startGame()
     }
 
     private func syncLocalPlayerIfNeeded(at currentTime: TimeInterval) {
         guard currentTime - lastMultiplayerSyncTime >= 0.1,
-              let session = localMultiplayerSession else { return }
+              let session = multiplayerTransport else { return }
         lastMultiplayerSyncTime = currentTime
         let state = MultiplayerPlayerState(
-            id: session.localPlayerID,
+            id: session.localPeerID,
             position: playerNode.position,
             color: multiplayerColor,
             health: playerNode.currentHealth,
@@ -709,47 +961,86 @@ final class GameScene: SKScene {
         )
         knownPlayerStates[state.id] = state
         hostID = MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values))
-        if !isMultiplayerClient { sendBoardSnapshot(using: session) }
+        if isMultiplayerClient {
+            guard let input = latestLocalPlayerInput else { return }
+            multiplayerCoordinator?.sendPlayerInput(MultiplayerPlayerInput(
+                playerID: input.playerID,
+                sequence: input.sequence,
+                movement: CGVector(dx: input.movement.x, dy: input.movement.y),
+                aimAngle: input.aimAngle,
+                wantsToAttack: input.wantsToAttack,
+                wantsToOpenChestID: pendingChestInteractionID ?? input.wantsToOpenChestID,
+                wantsToCollectPowerUpID: pendingPowerUpInteractionID ?? input.wantsToCollectPowerUpID
+            ))
+            pendingChestInteractionID = nil
+            pendingPowerUpInteractionID = nil
+            return
+        }
+        sendBoardSnapshot(using: session)
         guard let data = try? MultiplayerWireMessage.playerUpdate(state).encoded() else { return }
-        session.send(data)
+        try? session.broadcast(data, delivery: .replaceable)
     }
 
-    private func sendBoardSnapshot(using session: LocalMultiplayerNetworkSession) {
+    private func sendBoardSnapshot(using session: MultiplayerTransport) {
         multiplayerSnapshotSequence &+= 1
-        let board = MultiplayerBoardState(
+        let timestamp = Date().timeIntervalSince1970
+        let state = (isAuthoritativeMultiplayerHost ? authoritativeSimulationDriver?.state : nil)
+            ?? authoritativeGameState
+            ?? GameSceneStateAdapter.gameState(
+            localPlayer: playerNode,
+            remotePlayers: remotePlayers,
+            zombies: zombies,
+            chests: chests,
+            powerUps: powerUps,
+            projectiles: worldNode.children.compactMap { $0 as? ProjectileNode },
+            localPlayerID: session.localPeerID,
+            seed: 0,
+            tick: multiplayerSnapshotSequence,
+            score: killCount
+        )
+        let playerColors = knownPlayerStates.mapValues(\.color)
+        let sessionStartTimes = knownPlayerStates.mapValues(\.sessionStartedAt)
+        let hostID = MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values)) ?? session.localPeerID
+        let board = GameStateMultiplayerMapper.boardState(
+            from: state,
             sequence: multiplayerSnapshotSequence,
-            timestamp: Date().timeIntervalSince1970,
-            hostID: MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values)) ?? session.localPlayerID,
-            players: knownPlayerStates.values.sorted { $0.id < $1.id },
-            zombies: zombies.map { zombie in
-                MultiplayerZombieState(id: zombie.multiplayerID, x: Double(zombie.position.x), y: Double(zombie.position.y), health: Double(zombie.health), rotation: Double(zombie.zRotation))
-            },
-            chests: chests.map { chest in
-                MultiplayerChestState(id: chest.multiplayerID, x: Double(chest.position.x), y: Double(chest.position.y))
-            },
-            powerUps: powerUps.map { powerUp in
-                MultiplayerPowerUpState(id: powerUp.multiplayerID, x: Double(powerUp.position.x), y: Double(powerUp.position.y), type: powerUp.powerUp)
-            },
-            projectiles: worldNode.children.compactMap { $0 as? ProjectileNode }.map { projectile in
-                MultiplayerProjectileState(id: projectile.multiplayerID, x: Double(projectile.position.x), y: Double(projectile.position.y), angle: Double(projectile.zRotation), weapon: projectile.weapon, damage: Double(projectile.damage))
-            },
-            killCount: killCount
+            timestamp: timestamp,
+            hostID: hostID,
+            playerColors: playerColors,
+            sessionStartTimes: sessionStartTimes,
+            acknowledgedInputSequences: (multiplayerCoordinator?.acknowledgedInputSequences ?? [:])
         )
         guard let data = try? MultiplayerWireMessage.boardSnapshot(board).encoded() else { return }
-        session.send(data)
+        try? session.broadcast(data, delivery: .replaceable)
     }
 
     private func applyBoardSnapshot(_ board: MultiplayerBoardState) {
         if let acceptedHostID, acceptedHostID != board.hostID { return }
         acceptedHostID = board.hostID
         guard receivedSnapshotBuffer.append(board) else { return }
+        multiplayerRenderTick = max(multiplayerRenderTick, Double(board.simulationTick))
         hostID = board.hostID
         guard isMultiplayerClient else { return }
+
+        let predictionSeed = clientPredictionDriver?.state.seed ?? 0
+        let authoritativeState = GameStateMultiplayerMapper.gameState(from: board, seed: predictionSeed)
+        clientPredictionHistory.acknowledge(
+            sequence: board.acknowledgedInputSequences[multiplayerTransport?.localPeerID ?? ""] ?? 0,
+            for: multiplayerTransport?.localPeerID
+        )
+        let reconciledState = LocalPredictionReconciler.reconcile(
+            authoritativeState: authoritativeState,
+            acknowledgedInputSequence: board.acknowledgedInputSequences[multiplayerTransport?.localPeerID ?? ""] ?? 0,
+            pendingInputs: clientPredictionHistory.pendingInputs,
+            simulation: GameSimulation()
+        )
+        clientPredictionDriver = FixedTickSimulationDriver(initialState: reconciledState)
+
         killCount = board.killCount
         hudManager.updateKillCount(killCount)
 
         for state in board.players {
-            if state.id == localMultiplayerSession?.localPlayerID {
+            if state.id == multiplayerTransport?.localPeerID {
                 setMultiplayerTarget(state.position, for: state.id, on: playerNode)
                 playerNode.apply(multiplayerState: state)
                 hudManager.updateHealth(current: playerNode.currentHealth, max: playerNode.maxHealth, sceneWidth: size.width)
@@ -759,6 +1050,10 @@ final class GameScene: SKScene {
                     range: playerNode.currentWeaponRange,
                     fireRate: playerNode.currentWeaponFireRate
                 )
+                if let predictedPlayer = reconciledState.players.first(where: { $0.id == state.id }) {
+                    playerNode.position = predictedPlayer.position.cgPoint
+                    playerNode.zRotation = CGFloat(predictedPlayer.rotation)
+                }
             } else {
                 applyRemotePlayer(state, shouldSpawnNearHost: false)
             }
@@ -768,13 +1063,7 @@ final class GameScene: SKScene {
         reconcileChests(board.chests)
         reconcilePowerUps(board.powerUps)
 
-        worldNode.children.compactMap { $0 as? ProjectileNode }.forEach { $0.removeFromParent() }
-        for state in board.projectiles {
-            let projectile = ProjectileNode(weapon: state.weapon, damage: CGFloat(state.damage), directionAngle: CGFloat(state.angle), multiplayerID: state.id)
-            projectile.name = state.id
-            projectile.position = CGPoint(x: state.x, y: state.y)
-            worldNode.addChild(projectile)
-        }
+        reconcileProjectiles(board.projectiles)
     }
 
     private func setMultiplayerTarget(_ position: CGPoint, for id: String, on node: SKNode) {
@@ -786,7 +1075,36 @@ final class GameScene: SKScene {
     }
 
     private func interpolateMultiplayerNodes(dt: TimeInterval) {
-        if let target = multiplayerTargetPositions[localMultiplayerSession?.localPlayerID ?? ""] {
+        if isMultiplayerClient {
+            multiplayerRenderTick += max(0, dt * 60)
+            let renderTick = UInt64(max(0, multiplayerRenderTick.rounded(.down)))
+            let delayTicks: UInt64 = 2
+            let maxExtrapolationTicks: UInt64 = 3
+            for (id, player) in remotePlayers {
+                if let sampled = receivedSnapshotBuffer.position(
+                    for: id,
+                    renderTick: renderTick,
+                    delayTicks: delayTicks,
+                    maxExtrapolationTicks: maxExtrapolationTicks
+                ) {
+                    multiplayerTargetPositions[id] = sampled
+                    player.position = MultiplayerInterpolation.position(current: player.position, target: sampled, deltaTime: dt, responsiveness: 14)
+                }
+            }
+            for node in zombies + chests + powerUps {
+                guard let id = node.name,
+                      let sampled = receivedSnapshotBuffer.position(
+                          for: id,
+                          renderTick: renderTick,
+                          delayTicks: delayTicks,
+                          maxExtrapolationTicks: maxExtrapolationTicks
+                      ) else { continue }
+                multiplayerTargetPositions[id] = sampled
+                node.position = MultiplayerInterpolation.position(current: node.position, target: sampled, deltaTime: dt, responsiveness: 10)
+            }
+            return
+        }
+        if let target = multiplayerTargetPositions[multiplayerTransport?.localPeerID ?? ""] {
             playerNode.position = MultiplayerInterpolation.position(current: playerNode.position, target: target, deltaTime: dt, responsiveness: 14)
         }
         for (id, player) in remotePlayers {
@@ -800,54 +1118,96 @@ final class GameScene: SKScene {
     }
 
     private func reconcileZombies(_ states: [MultiplayerZombieState]) {
-        let incomingIDs = Set(states.map(\.id))
-        for zombie in zombies where !incomingIDs.contains(zombie.name ?? "") { zombie.removeFromParent() }
-        zombies.removeAll { !incomingIDs.contains($0.name ?? "") }
-        for state in states {
-            let zombie: ZombieNode
-            if let existing = zombies.first(where: { $0.name == state.id }) {
-                zombie = existing
-            } else {
-                zombie = ZombieNode(multiplayerID: state.id)
+        var entities = Dictionary(uniqueKeysWithValues: zombies.map { ($0.multiplayerID, $0) })
+        MultiplayerEntityReconciler.reconcile(
+            states: states,
+            entities: &entities,
+            id: \.id,
+            create: { [worldNode] state in
+                let zombie = ZombieNode(multiplayerID: state.id)
                 zombie.name = state.id
                 worldNode.addChild(zombie)
-                zombies.append(zombie)
-            }
-            setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: zombie)
-            zombie.zRotation = CGFloat(state.rotation)
-            zombie.apply(multiplayerHealth: CGFloat(state.health))
-        }
+                return zombie
+            },
+            update: { [weak self] zombie, state in
+                self?.setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: zombie)
+                zombie.zRotation = CGFloat(state.rotation)
+                zombie.apply(multiplayerHealth: CGFloat(state.health))
+            },
+            remove: { $0.removeFromParent() }
+        )
+        zombies = states.compactMap { entities[$0.id] }
     }
 
     private func reconcileChests(_ states: [MultiplayerChestState]) {
+        var entities = Dictionary(uniqueKeysWithValues: chests.map { ($0.multiplayerID, $0) })
+        MultiplayerEntityReconciler.reconcile(
+            states: states,
+            entities: &entities,
+            id: \.id,
+            create: { [worldNode] state in
+                let chest = ChestNode(multiplayerID: state.id)
+                chest.name = state.id
+                worldNode.addChild(chest)
+                return chest
+            },
+            update: { [weak self] chest, state in
+                self?.setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: chest)
+            },
+            remove: { $0.removeFromParent() }
+        )
+        chests = states.compactMap { entities[$0.id] }
+    }
+
+    private func reconcileProjectiles(_ states: [MultiplayerProjectileState]) {
+        var entities: [String: ProjectileNode] = Dictionary(uniqueKeysWithValues: worldNode.children.compactMap { node in
+            guard let projectile = node as? ProjectileNode else { return nil }
+            return (projectile.multiplayerID, projectile)
+        })
         let incomingIDs = Set(states.map(\.id))
-        for chest in chests where !incomingIDs.contains(chest.name ?? "") { chest.removeFromParent() }
-        chests.removeAll { !incomingIDs.contains($0.name ?? "") }
+        for projectile in entities.values where !incomingIDs.contains(projectile.multiplayerID) {
+            projectile.removeFromParent()
+        }
         for state in states {
-            let chest: ChestNode
-            if let existing = chests.first(where: { $0.name == state.id }) { chest = existing }
-            else { chest = ChestNode(multiplayerID: state.id); chest.name = state.id; worldNode.addChild(chest); chests.append(chest) }
-            setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: chest)
+            if let projectile = entities[state.id], projectile.weapon == state.weapon, projectile.damage == CGFloat(state.damage) {
+                projectile.position = CGPoint(x: state.x, y: state.y)
+                projectile.zRotation = CGFloat(state.angle)
+            } else {
+                entities[state.id]?.removeFromParent()
+                let projectile = ProjectileNode(weapon: state.weapon, damage: CGFloat(state.damage), directionAngle: CGFloat(state.angle), multiplayerID: state.id)
+                projectile.name = state.id
+                projectile.position = CGPoint(x: state.x, y: state.y)
+                worldNode.addChild(projectile)
+                entities[state.id] = projectile
+            }
         }
     }
 
     private func reconcilePowerUps(_ states: [MultiplayerPowerUpState]) {
-        let incomingIDs = Set(states.map(\.id))
-        for powerUp in powerUps where !incomingIDs.contains(powerUp.name ?? "") { powerUp.removeFromParent() }
-        powerUps.removeAll { !incomingIDs.contains($0.name ?? "") }
-        for state in states {
-            let powerUp: PowerUpNode
-            if let existing = powerUps.first(where: { $0.name == state.id }) { powerUp = existing }
-            else { powerUp = PowerUpNode(powerUp: state.type, multiplayerID: state.id); powerUp.name = state.id; worldNode.addChild(powerUp); powerUps.append(powerUp) }
-            setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: powerUp)
-        }
+        var entities = Dictionary(uniqueKeysWithValues: powerUps.map { ($0.multiplayerID, $0) })
+        MultiplayerEntityReconciler.reconcile(
+            states: states,
+            entities: &entities,
+            id: \.id,
+            create: { [worldNode] state in
+                let powerUp = PowerUpNode(powerUp: state.type, multiplayerID: state.id)
+                powerUp.name = state.id
+                worldNode.addChild(powerUp)
+                return powerUp
+            },
+            update: { [weak self] powerUp, state in
+                self?.setMultiplayerTarget(CGPoint(x: state.x, y: state.y), for: state.id, on: powerUp)
+            },
+            remove: { $0.removeFromParent() }
+        )
+        powerUps = states.compactMap { entities[$0.id] }
     }
 
     private func applyRemotePlayer(_ state: MultiplayerPlayerState, shouldSpawnNearHost: Bool = true) {
-        guard let session = localMultiplayerSession, state.id != session.localPlayerID else { return }
+        guard let session = multiplayerTransport, state.id != session.localPeerID else { return }
 
         let localColor = MultiplayerSpawnPlanner.color(
-            localID: session.localPlayerID,
+            localID: session.localPeerID,
             remoteID: state.id
         )
         multiplayerColor = localColor
@@ -877,21 +1237,32 @@ final class GameScene: SKScene {
     }
 }
 
-extension GameScene: LocalMultiplayerNetworkSessionDelegate {
-    func networkSession(_ session: LocalMultiplayerNetworkSession, didReceive data: Data) {
-        let applyMessage = { [weak self] in
-            guard let message = try? MultiplayerWireMessage.decode(data) else { return }
-            if case let .playerUpdate(state) = message {
-                guard let self else { return }
-                self.knownPlayerStates[state.id] = state
-                self.hostID = MultiplayerHostSelector.hostID(for: Array(self.knownPlayerStates.values))
-                self.applyRemotePlayer(state)
-            } else if case let .boardSnapshot(board) = message {
-                self?.applyBoardSnapshot(board)
-            }
+extension GameScene {
+    fileprivate func handleMultiplayerMessage(_ message: MultiplayerWireMessage) {
+        switch message {
+        case let .playerUpdate(state):
+            knownPlayerStates[state.id] = state
+            hostID = MultiplayerHostSelector.hostID(for: Array(knownPlayerStates.values))
+            applyRemotePlayer(state)
+        case let .boardSnapshot(board):
+            applyBoardSnapshot(board)
+        case let .gameplayEvent(envelope):
+            applyGameplayEvent(envelope.event)
+        default:
+            break
         }
+    }
 
-        DispatchQueue.main.async(execute: applyMessage)
+    private func applyGameplayEvent(_ event: GameplayEvent) {
+        guard isMultiplayerClient else { return }
+        switch event {
+        case .matchEnded:
+            triggerGameOver()
+        case .projectileSpawned, .meleeAttack, .zombieDamaged, .zombieKilled,
+             .chestOpened, .powerUpCollected, .playerDamaged, .playerEliminated:
+            // Entity and health changes are committed by the next authoritative snapshot.
+            break
+        }
     }
 }
 
