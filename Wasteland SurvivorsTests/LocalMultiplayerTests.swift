@@ -4,7 +4,7 @@ import Testing
 @testable import Wasteland_Survivors
 
 @MainActor
-private final class FakeMultiplayerSession: MultiplayerTransport {
+final class FakeMultiplayerSession: MultiplayerTransport {
     weak var delegate: MultiplayerTransportDelegate?
     let localPeerID: String
     private(set) var state: MultiplayerTransportState = .idle
@@ -259,6 +259,273 @@ struct LocalMultiplayerTests {
 
         let movedPosition = try #require(scene.remotePlayers["client"]?.position)
         #expect(movedPosition.x > initialPosition.x)
+    }
+
+    @Test("Host local player moves on the host screen while the remote client sees the same movement")
+    @MainActor
+    func hostLocalPlayerMovesOnHostScreenDuringMultiplayer() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match",
+            peerID: "client",
+            protocolVersion: 1
+        )).encoded(), from: "client")
+
+        let initialWorldPosition = scene.playerNode.position
+        let initialScreenPosition = scene.cameraNode.convert(
+            scene.playerNode.position,
+            from: scene.worldNode
+        )
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+
+        scene.update(0)
+        scene.update(1.0 / 60.0)
+
+        let currentScreenPosition = scene.cameraNode.convert(
+            scene.playerNode.position,
+            from: scene.worldNode
+        )
+        #expect(scene.playerNode.position.x > initialWorldPosition.x)
+        #expect(currentScreenPosition.x > initialScreenPosition.x)
+    }
+
+    @Test("A host renders every independently joined client")
+    @MainActor
+    func hostRendersEveryJoinedClient() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+
+        for clientID in ["client-1", "client-2"] {
+            session.connectedPeerIDs.insert(clientID)
+            session.deliver(try MultiplayerWireMessage.hello(.init(
+                sessionID: "match",
+                peerID: clientID,
+                startedAt: clientID == "client-1" ? 9_999_999_999 : 10_000_000_000,
+                protocolVersion: 1
+            )).encoded())
+            session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+                sessionID: "match",
+                peerID: clientID,
+                protocolVersion: 1
+            )).encoded(), from: clientID)
+        }
+
+        #expect(Set(scene.remotePlayers.keys) == ["client-1", "client-2"])
+        #expect(scene.remotePlayers.values.allSatisfy { $0.parent === scene.worldNode })
+    }
+
+    @Test("A late client receives the active host world after gameplay has advanced")
+    @MainActor
+    func lateClientReceivesActiveWorldAfterGameplayHasAdvanced() throws {
+        let hostSession = FakeMultiplayerSession(localPlayerID: "host")
+        let hostScene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { hostSession }
+        )
+        let hostView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        hostScene.didMove(to: hostView)
+        hostScene.startLocalMultiplayer()
+        hostScene.movementVector = CGVector(dx: 1, dy: 0)
+        hostScene.update(0)
+        hostScene.update(1.0 / 60.0)
+        hostScene.update(2.0 / 60.0)
+
+        hostSession.connectedPeerIDs.insert("client")
+        hostSession.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+        hostSession.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match",
+            peerID: "client",
+            protocolVersion: 1
+        )).encoded(), from: "client")
+
+        let initialization = try #require(hostSession.sentData.compactMap { data -> MultiplayerInitializationPayload? in
+            guard case let .initialization(payload) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            return payload
+        }.last)
+
+        let clientSession = FakeMultiplayerSession(localPlayerID: "client")
+        let clientScene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { clientSession }
+        )
+        let clientView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        clientScene.didMove(to: clientView)
+        clientScene.startLocalMultiplayer()
+        clientSession.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        clientSession.deliver(try MultiplayerWireMessage.initialization(initialization).encoded(), from: "host")
+
+        #expect(clientScene.remotePlayers["host"]?.position == hostScene.playerNode.position)
+        #expect(clientScene.zombies.map(\.multiplayerID) == hostScene.zombies.map(\.multiplayerID))
+        #expect(clientScene.chests.map(\.multiplayerID) == hostScene.chests.map(\.multiplayerID))
+        #expect(clientScene.powerUps.map(\.multiplayerID) == hostScene.powerUps.map(\.multiplayerID))
+    }
+
+    @Test("Repeated initialization does not duplicate client world entities")
+    @MainActor
+    func repeatedInitializationDoesNotDuplicateClientWorldEntities() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        let payload = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 12,
+            seed: 42,
+            hostID: "host",
+            players: [
+                MultiplayerInitializationPlayer(id: "host", position: .zero),
+                MultiplayerInitializationPlayer(id: "client", position: CGPointValue(x: 80, y: 0))
+            ],
+            zombies: [
+                MultiplayerInitializationZombie(
+                    id: "zombie-1",
+                    position: CGPointValue(x: 120, y: 0),
+                    health: 100
+                )
+            ]
+        )
+        let message = try MultiplayerWireMessage.initialization(payload).encoded()
+
+        session.deliver(message, from: "host")
+        let firstCounts = (scene.zombies.count, scene.chests.count, scene.powerUps.count)
+        session.deliver(message, from: "host")
+
+        #expect((scene.zombies.count, scene.chests.count, scene.powerUps.count) == firstCounts)
+        #expect(Set(scene.zombies.map(\.multiplayerID)).count == scene.zombies.count)
+        #expect(Set(scene.chests.map(\.multiplayerID)).count == scene.chests.count)
+        #expect(Set(scene.powerUps.map(\.multiplayerID)).count == scene.powerUps.count)
+    }
+
+    @Test("Disconnecting a client removes its host-side player visual")
+    @MainActor
+    func disconnectingClientRemovesHostSidePlayerVisual() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded())
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match",
+            peerID: "client",
+            protocolVersion: 1
+        )).encoded(), from: "client")
+
+        let player = try #require(scene.remotePlayers["client"])
+        #expect(player.parent === scene.worldNode)
+        session.peerDisconnected("client")
+
+        #expect(scene.remotePlayers["client"] == nil)
+        #expect(player.parent == nil)
+    }
+
+    @Test("A client renders a host melee attack from the replicated event")
+    @MainActor
+    func clientRendersHostMeleeAttackFromReplicatedEvent() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        let initialization = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 1,
+            seed: 42,
+            hostID: "host",
+            players: [
+                MultiplayerInitializationPlayer(id: "host", position: CGPointValue(x: 20, y: 0)),
+                MultiplayerInitializationPlayer(id: "client", position: .zero)
+            ],
+            zombies: [
+                MultiplayerInitializationZombie(
+                    id: "zombie-1",
+                    position: CGPointValue(x: 60, y: 0),
+                    health: 100
+                )
+            ]
+        )
+        session.deliver(try MultiplayerWireMessage.initialization(initialization).encoded(), from: "host")
+
+        let event = MultiplayerEventEnvelope(
+            sessionID: "match",
+            sequence: 2,
+            simulationTick: 2,
+            senderID: "host",
+            payload: .meleeAttack(attackID: "attack-1", playerID: "host")
+        )
+        session.deliver(try MultiplayerWireMessage.event(event).encoded(), from: "host")
+
+        #expect(scene.worldNode.children.contains { $0 is MeleeSlashNode })
     }
 
     @Test("Client ignores deprecated match-ended messages outside the event contract")
@@ -619,6 +886,129 @@ struct LocalMultiplayerTests {
         #expect(ids.allSatisfy { !$0.isEmpty })
         #expect(Set(ids).count == ids.count)
     }
+
+    @Test("A newly joined client renders every seeded world entity from initialization")
+    @MainActor
+    func newlyJoinedClientRendersSeededWorldEntitiesFromInitialization() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        let payload = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 240,
+            seed: 0xCAFE,
+            hostID: "host",
+            players: [
+                MultiplayerInitializationPlayer(id: "host", position: CGPointValue(x: 100, y: 20)),
+                MultiplayerInitializationPlayer(id: "client", position: CGPointValue(x: 180, y: 20))
+            ],
+            zombies: [
+                MultiplayerInitializationZombie(
+                    id: "zombie-42",
+                    position: CGPointValue(x: 260, y: -40),
+                    health: 73
+                )
+            ]
+        )
+
+        session.deliver(try MultiplayerWireMessage.initialization(payload).encoded(), from: "host")
+
+        #expect(scene.zombies.map(\.multiplayerID) == ["zombie-42"])
+        #expect(scene.zombies.first?.position == CGPoint(x: 260, y: -40))
+        #expect(scene.chests.map(\.multiplayerID) == ["chest-1", "chest-2", "chest-3", "chest-4", "chest-5", "chest-6", "chest-7", "chest-8"])
+        #expect(scene.powerUps.map(\.multiplayerID) == ["power-up-1"])
+        #expect(scene.worldNode.children.contains { $0 is ZombieNode && $0.parent === scene.worldNode })
+        #expect(scene.worldNode.children.contains { $0 is ChestNode && $0.parent === scene.worldNode })
+        #expect(scene.worldNode.children.contains { $0 is PowerUpNode && $0.parent === scene.worldNode })
+    }
+
+    @Test("A client keeps seeded entity IDs and positions after an authoritative recovery")
+    @MainActor
+    func clientKeepsSeededEntityIDsAndPositionsAfterRecovery() throws {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+
+        let initialization = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 240,
+            seed: 0xCAFE,
+            hostID: "host",
+            players: [
+                MultiplayerInitializationPlayer(id: "host", position: CGPointValue(x: 100, y: 20)),
+                MultiplayerInitializationPlayer(id: "client", position: CGPointValue(x: 180, y: 20))
+            ],
+            zombies: [
+                MultiplayerInitializationZombie(
+                    id: "zombie-42",
+                    position: CGPointValue(x: 260, y: -40),
+                    health: 73
+                )
+            ]
+        )
+        session.deliver(try MultiplayerWireMessage.initialization(initialization).encoded(), from: "host")
+
+        let recovery = MultiplayerRecoveryPayload(
+            sessionID: "match",
+            firstSequence: 1,
+            lastSequence: 1,
+            simulationTick: 241,
+            players: [
+                MultiplayerInitializationPlayer(id: "host", position: CGPointValue(x: 100, y: 20)),
+                MultiplayerInitializationPlayer(id: "client", position: CGPointValue(x: 180, y: 20))
+            ],
+            zombies: [
+                MultiplayerInitializationZombie(
+                    id: "zombie-42",
+                    position: CGPointValue(x: 275, y: -35),
+                    health: 61
+                )
+            ],
+            activeChests: ["chest-1", "chest-2", "chest-3", "chest-4", "chest-5", "chest-6", "chest-7", "chest-8"],
+            activePowerUps: ["power-up-1"],
+            score: 4,
+            playerTargets: [:],
+            zombieTargets: [:],
+            equipment: [:],
+            removedEntities: [],
+            playerDeaths: []
+        )
+
+        session.deliver(try MultiplayerWireMessage.recovery(recovery).encoded(), from: "host")
+
+        #expect(scene.zombies.map(\.multiplayerID) == ["zombie-42"])
+        #expect(scene.zombies.first?.position == CGPoint(x: 275, y: -35))
+        #expect(scene.chests.map(\.multiplayerID) == ["chest-1", "chest-2", "chest-3", "chest-4", "chest-5", "chest-6", "chest-7", "chest-8"])
+        #expect(scene.powerUps.map(\.multiplayerID) == ["power-up-1"])
+    }
+
 
     @Test("MultipeerConnectivity uses the transport identity in peer callbacks")
     func multipeerConnectivityUsesTransportIdentityInPeerCallbacks() {

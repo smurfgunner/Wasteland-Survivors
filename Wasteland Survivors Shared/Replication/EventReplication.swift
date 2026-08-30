@@ -66,6 +66,8 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
     case weaponChanged(playerID: String, weapon: WeaponType)
     case powerUpAcquired(playerID: String, type: PowerUpType)
     case playerTargetChanged(playerID: String, zombieID: String?)
+    case projectileSpawned(projectileID: String, playerID: String)
+    case meleeAttack(attackID: String, playerID: String)
     case zombieHealthChanged(zombieID: String, damage: Double, health: Double, sourcePlayerID: String)
     case playerDamaged(playerID: String, damage: Double, health: Double, sourceID: String)
     case zombieTargetChanged(zombieID: String, playerID: String?)
@@ -76,8 +78,8 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
 
     init(gameplayEvent: GameplayEvent, sourcePlayerID: String) {
         switch gameplayEvent {
-        case let .projectileSpawned(id, ownerID): self = .playerTransformChanged(playerID: ownerID.isEmpty ? sourcePlayerID : ownerID, position: .zero, facing: 0)
-        case let .meleeAttack(_, ownerID): self = .playerTargetChanged(playerID: ownerID.isEmpty ? sourcePlayerID : ownerID, zombieID: nil)
+        case let .projectileSpawned(projectileID, ownerID): self = .projectileSpawned(projectileID: projectileID, playerID: ownerID.isEmpty ? sourcePlayerID : ownerID)
+        case let .meleeAttack(id, ownerID): self = .meleeAttack(attackID: id, playerID: ownerID.isEmpty ? sourcePlayerID : ownerID)
         case let .zombieDamaged(id, amount): self = .zombieHealthChanged(zombieID: id, damage: amount, health: 0, sourcePlayerID: sourcePlayerID)
         case let .zombieKilled(id, ownerID): self = .zombieDied(zombieID: id, killerID: ownerID.isEmpty ? sourcePlayerID : ownerID)
         case let .chestOpened(id, playerID, weapon): self = .itemCollected(entityID: id, collectorID: playerID, result: .weapon(weapon))
@@ -88,8 +90,8 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case type, playerID, zombieID, position, facing, weapon, typeValue, damage, health, sourcePlayerID, sourceID, entityID, collectorID, result, killerID, delta, total }
-    private enum EventType: String, Codable { case playerTransformChanged, weaponChanged, powerUpAcquired, playerTargetChanged, zombieHealthChanged, playerDamaged, zombieTargetChanged, itemCollected, zombieDied, playerDied, scoreChanged }
+    private enum CodingKeys: String, CodingKey { case type, playerID, attackID, zombieID, position, facing, weapon, typeValue, damage, health, sourcePlayerID, sourceID, entityID, collectorID, result, killerID, delta, total }
+    private enum EventType: String, Codable { case playerTransformChanged, weaponChanged, powerUpAcquired, playerTargetChanged, projectileSpawned, meleeAttack, zombieHealthChanged, playerDamaged, zombieTargetChanged, itemCollected, zombieDied, playerDied, scoreChanged }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -98,6 +100,8 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
         case .weaponChanged: self = .weaponChanged(playerID: try c.decode(String.self, forKey: .playerID), weapon: try c.decode(WeaponType.self, forKey: .weapon))
         case .powerUpAcquired: self = .powerUpAcquired(playerID: try c.decode(String.self, forKey: .playerID), type: try c.decode(PowerUpType.self, forKey: .typeValue))
         case .playerTargetChanged: self = .playerTargetChanged(playerID: try c.decode(String.self, forKey: .playerID), zombieID: try c.decodeIfPresent(String.self, forKey: .zombieID))
+        case .projectileSpawned: self = .projectileSpawned(projectileID: try c.decode(String.self, forKey: .entityID), playerID: try c.decode(String.self, forKey: .playerID))
+        case .meleeAttack: self = .meleeAttack(attackID: try c.decode(String.self, forKey: .attackID), playerID: try c.decode(String.self, forKey: .playerID))
         case .zombieHealthChanged: self = .zombieHealthChanged(zombieID: try c.decode(String.self, forKey: .zombieID), damage: try c.decode(Double.self, forKey: .damage), health: try c.decode(Double.self, forKey: .health), sourcePlayerID: try c.decode(String.self, forKey: .sourcePlayerID))
         case .playerDamaged: self = .playerDamaged(playerID: try c.decode(String.self, forKey: .playerID), damage: try c.decode(Double.self, forKey: .damage), health: try c.decode(Double.self, forKey: .health), sourceID: try c.decode(String.self, forKey: .sourceID))
         case .zombieTargetChanged: self = .zombieTargetChanged(zombieID: try c.decode(String.self, forKey: .zombieID), playerID: try c.decodeIfPresent(String.self, forKey: .playerID))
@@ -116,6 +120,8 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
         case let .weaponChanged(id, weapon): try type(.weaponChanged); try c.encode(id, forKey: .playerID); try c.encode(weapon, forKey: .weapon)
         case let .powerUpAcquired(id, powerUp): try type(.powerUpAcquired); try c.encode(id, forKey: .playerID); try c.encode(powerUp, forKey: .typeValue)
         case let .playerTargetChanged(id, zombieID): try type(.playerTargetChanged); try c.encode(id, forKey: .playerID); try c.encodeIfPresent(zombieID, forKey: .zombieID)
+        case let .projectileSpawned(projectileID, playerID): try type(.projectileSpawned); try c.encode(projectileID, forKey: .entityID); try c.encode(playerID, forKey: .playerID)
+        case let .meleeAttack(attackID, playerID): try type(.meleeAttack); try c.encode(attackID, forKey: .attackID); try c.encode(playerID, forKey: .playerID)
         case let .zombieHealthChanged(id, damage, health, source): try type(.zombieHealthChanged); try c.encode(id, forKey: .zombieID); try c.encode(damage, forKey: .damage); try c.encode(health, forKey: .health); try c.encode(source, forKey: .sourcePlayerID)
         case let .playerDamaged(id, damage, health, source): try type(.playerDamaged); try c.encode(id, forKey: .playerID); try c.encode(damage, forKey: .damage); try c.encode(health, forKey: .health); try c.encode(source, forKey: .sourceID)
         case let .zombieTargetChanged(id, playerID): try type(.zombieTargetChanged); try c.encode(id, forKey: .zombieID); try c.encodeIfPresent(playerID, forKey: .playerID)
@@ -288,6 +294,10 @@ struct EventReplicationSystem {
         case let .playerTargetChanged(id, zombieID):
             guard players[id] != nil, zombieID == nil || zombies[zombieID ?? ""] != nil else { return false }
             targets[id] = zombieID
+        case let .projectileSpawned(_, playerID):
+            guard players[playerID] != nil else { return false }
+        case let .meleeAttack(_, playerID):
+            guard players[playerID] != nil else { return false }
         case let .zombieHealthChanged(id, _, health, source):
             guard players[source] != nil else { return false }
             guard var zombie = zombies[id] else { return false }
@@ -317,8 +327,6 @@ struct EventReplicationSystem {
             players.removeValue(forKey: id)
         case let .scoreChanged(_, total):
             currentScore = total
-        default:
-            break
         }
         return true
     }

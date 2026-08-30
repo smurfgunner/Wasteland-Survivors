@@ -304,6 +304,41 @@ struct MultiplayerCombatBehaviorTests {
         #expect(step.events.contains { if case .zombieKilled(id: "zombie", ownerID: "player") = $0 { return true }; return false })
     }
 
+    @Test("Every melee player emits a visual attack event for its own attack")
+    func everyMeleePlayerEmitsAVisualAttackEventForItsOwnAttack() {
+        // Given two melee players with separate in-range targets.
+        let state = makeState(
+            players: [
+                makePlayer(id: "host", position: .zero, weapon: .sword),
+                makePlayer(id: "client", position: CGPointValue(x: 200, y: 0), weapon: .spear)
+            ],
+            zombies: [
+                makeZombie(id: "host-zombie", position: CGPointValue(x: 50, y: 0)),
+                makeZombie(id: "client-zombie", position: CGPointValue(x: 250, y: 0))
+            ]
+        )
+
+        // When the authoritative multiplayer tick resolves both attacks.
+        let step = GameSimulation().advance(
+            state,
+            inputs: [
+                input(for: "host", sequence: 1, wantsToAttack: true),
+                input(for: "client", sequence: 1, wantsToAttack: true)
+            ],
+            tick: 1
+        )
+
+        // Then each player emits one attack event that peers can render.
+        let attackers = step.events.compactMap { event -> String? in
+            if case let .meleeAttack(_, ownerID) = event {
+                return ownerID
+            }
+            return nil
+        }
+        #expect(attackers.count == 2)
+        #expect(Set(attackers) == ["host", "client"])
+    }
+
     @Test("Ranged projectiles preserve their owner and damage through collision resolution")
     func rangedProjectilesPreserveTheirOwnerAndDamageThroughCollisionResolution() {
         // Given a ranged player and a zombie on the firing line.

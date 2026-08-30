@@ -64,6 +64,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     private var nextGameplayEventSequence: UInt64 = 0
     private var lastReceivedEventSequence: UInt64 = 0
     private var lastPublishedTransforms: [String: (CGPointValue, Double)] = [:]
+    private var lastPublishedPlayerTargets: [String: String] = [:]
+    private var lastPublishedZombieTargets: [String: String] = [:]
     private var eventReplicationSystem: EventReplicationSystem?
     private var hasSentHello = false
 
@@ -76,6 +78,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     /// Called after a host has accepted a peer, allowing the gameplay layer to
     /// immediately send the complete authoritative state for late join-in.
     var onPeerJoined: ((String) -> Void)?
+    var onPeerDisconnected: ((String) -> Void)?
     var onHostLost: ((String) -> Void)?
     var onInput: ((MultiplayerPlayerInput) -> Void)?
     var onGameplayEvent: ((MultiplayerGameplayEvent) -> Void)?
@@ -199,10 +202,38 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     func publishSimulationStep(_ step: SimulationStep) {
         for player in step.state.players {
             let transform = (player.position, player.rotation)
-            guard lastPublishedTransforms[player.id]?.0 != transform.0 || lastPublishedTransforms[player.id]?.1 != transform.1 else { continue }
-            lastPublishedTransforms[player.id] = transform
-            publishEvent(.playerTransformChanged(playerID: player.id, position: player.position, facing: player.rotation), tick: step.state.tick)
+            if lastPublishedTransforms[player.id]?.0 != transform.0 || lastPublishedTransforms[player.id]?.1 != transform.1 {
+                lastPublishedTransforms[player.id] = transform
+                publishEvent(.playerTransformChanged(playerID: player.id, position: player.position, facing: player.rotation), tick: step.state.tick)
+            }
+
+            let targetID = step.state.zombies
+                .filter { $0.health > 0 }
+                .min {
+                    let firstDistance = $0.position.distance(to: player.position)
+                    let secondDistance = $1.position.distance(to: player.position)
+                    return firstDistance == secondDistance ? $0.id < $1.id : firstDistance < secondDistance
+                }?.id ?? ""
+            if lastPublishedPlayerTargets[player.id] != targetID {
+                lastPublishedPlayerTargets[player.id] = targetID
+                publishEvent(
+                    .playerTargetChanged(playerID: player.id, zombieID: targetID.isEmpty ? nil : targetID),
+                    tick: step.state.tick
+                )
+            }
         }
+
+        for zombie in step.state.zombies where zombie.health > 0 {
+            let targetID = NPCDecisionSystem.target(for: zombie, players: step.state.players)?.id ?? ""
+            if lastPublishedZombieTargets[zombie.id] != targetID {
+                lastPublishedZombieTargets[zombie.id] = targetID
+                publishEvent(
+                    .zombieTargetChanged(zombieID: zombie.id, playerID: targetID.isEmpty ? nil : targetID),
+                    tick: step.state.tick
+                )
+            }
+        }
+
         publishGameplayEvents(step.events, tick: step.state.tick)
     }
 
@@ -277,6 +308,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         latestInputs[peerID] = nil
         acknowledgedInputSequencesStorage[peerID] = nil
         queuedInputs.removeAll { $0.playerID == peerID }
+        onPeerDisconnected?(peerID)
 
         if hostID == peerID, role == .client {
             let candidates = Set(transport.connectedPeerIDs).union([transport.localPeerID])

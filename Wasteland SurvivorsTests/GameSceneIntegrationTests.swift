@@ -616,6 +616,22 @@ struct GameSceneIntegrationTests {
         #expect(projectiles.count == 3)
     }
 
+    @Test("Offline melee attacks render a slash through the real game loop")
+    func offlineMeleeAttacksRenderASlashThroughTheRealGameLoop() {
+        // Given an active offline game with a sword equipped and a nearby zombie.
+        let scene = makeScene()
+        scene.playerNode.equip(weapon: .sword)
+        scene.update(1)
+        scene.update(1.7)
+        scene.zombies[0].position = CGPoint(x: 50, y: 0)
+
+        // When one fixed simulation tick is processed.
+        scene.update(1.7 + 1.0 / 60.0)
+
+        // Then the melee attack is visible in the SpriteKit world.
+        #expect(scene.worldNode.children.contains { $0 is MeleeSlashNode })
+    }
+
     @Test("Offline zombie simulation updates movement and facing toward the player")
     func offlineZombieSimulationUpdatesMovementAndFacingTowardPlayer() {
         // Given an active offline game after the first zombie has spawned.

@@ -115,6 +115,7 @@ struct EventReplicationGameplayTests {
             .weaponChanged(playerID: "p", weapon: .rifle),
             .powerUpAcquired(playerID: "p", type: .damage),
             .playerTargetChanged(playerID: "p", zombieID: "z"),
+            .meleeAttack(attackID: "attack-1", playerID: "p"),
             .zombieHealthChanged(zombieID: "z", damage: 10, health: 90, sourcePlayerID: "p"),
             .playerDamaged(playerID: "p", damage: 10, health: 90, sourceID: "z"),
             .zombieTargetChanged(zombieID: "z", playerID: "p"),
