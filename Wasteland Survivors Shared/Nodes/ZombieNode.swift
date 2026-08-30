@@ -6,6 +6,7 @@
 import SpriteKit
 
 final class ZombieNode: SKNode {
+    let multiplayerID: String
     static let hitFlashDuration: TimeInterval = 0.06
     static let deathAnimationDuration: TimeInterval = 0.25
 
@@ -19,7 +20,8 @@ final class ZombieNode: SKNode {
     private let bodySprite = SKShapeNode(circleOfRadius: 15)
     private let healthBar = SKShapeNode(rectOf: CGSize(width: 24, height: 4), cornerRadius: 1)
     
-    init(randomSource: RandomSource = SystemRandomSource()) {
+    init(randomSource: RandomSource = SystemRandomSource(), multiplayerID: String = UUID().uuidString) {
+        self.multiplayerID = multiplayerID
         self.randomSource = randomSource
         moveSpeed = randomSource.nextCGFloat(in: 60...95)
         super.init()
@@ -107,6 +109,30 @@ final class ZombieNode: SKNode {
         if health <= 0 {
             die()
         }
+    }
+
+    func apply(multiplayerHealth: CGFloat) {
+        let authoritativeHealth = Swift.max(0, Swift.min(60, multiplayerHealth))
+        health = authoritativeHealth
+        healthBar.xScale = health / 60
+        if health <= 0 {
+            if !isDead {
+                die()
+            }
+            return
+        }
+
+        if isDead {
+            revive()
+        }
+    }
+
+    private func revive() {
+        isDead = false
+        removeAllActions()
+        alpha = 1
+        setScale(1)
+        setupPhysics()
     }
     
     private func die() {

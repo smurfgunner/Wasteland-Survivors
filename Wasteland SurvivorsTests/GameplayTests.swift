@@ -87,6 +87,19 @@ struct GameplayTests {
         #expect(scene.worldNode.children.contains { $0 is PowerUpNode })
     }
 
+    @Test("Repeated authoritative death snapshots do not restart zombie cleanup")
+    func repeatedAuthoritativeDeathSnapshotsDoNotRestartZombieCleanup() {
+        let zombie = ZombieNode(randomSource: FixedRandomSource())
+
+        zombie.apply(multiplayerHealth: 0)
+        let firstDeathAnimation = zombie.action(forKey: "deathAnimation")
+
+        zombie.apply(multiplayerHealth: 0)
+        let secondDeathAnimation = zombie.action(forKey: "deathAnimation")
+
+        #expect(firstDeathAnimation === secondDeathAnimation)
+    }
+
     @Test("Weapon definitions expose stable combat behavior")
     func weaponDefinitionsRemainStable() {
         #expect(WeaponType.pistol.category == .ranged)
@@ -263,6 +276,22 @@ struct GameplayTests {
         #expect(!player.updateHealth(deltaTime: 1))
     }
     
+    @Test("Replicated zero zombie health transitions the node to its death state")
+    func replicatedZeroZombieHealthTransitionsNodeToDeathState() {
+        // Given a live zombie node receiving an authoritative health update.
+        let zombie = ZombieNode()
+        let world = SKNode()
+        world.addChild(zombie)
+
+        // When the authoritative state reports zero health.
+        zombie.apply(multiplayerHealth: 0)
+
+        // Then the presentation node is dead and no longer participates in physics.
+        #expect(zombie.health == 0)
+        #expect(zombie.isDead)
+        #expect(zombie.physicsBody == nil)
+    }
+
     @Test("Zombie damage updates health and death state")
     func zombieDamageUpdatesHealthAndDeathState() {
         let zombie = ZombieNode()

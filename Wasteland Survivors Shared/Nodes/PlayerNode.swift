@@ -11,7 +11,12 @@ final class PlayerNode: SKNode {
     let maxHealth: CGFloat = 100
     private(set) var currentHealth: CGFloat = 100
     private(set) var currentWeapon: WeaponType = .pistol
+    private(set) var multiplayerColor: MultiplayerPlayerColor = .blue
     private var appliedPowerUps: Set<PowerUpType> = []
+
+    var appliedPowerUpTypes: [PowerUpType] {
+        PowerUpType.allCases.filter { appliedPowerUps.contains($0) }
+    }
 
     var currentWeaponDamage: CGFloat {
         currentWeapon.damage * (appliedPowerUps.contains(.damage) ? 1.25 : 1)
@@ -45,7 +50,7 @@ final class PlayerNode: SKNode {
     }
     
     private func setupVisuals() {
-        bodySprite.fillColor = SKColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1.0)
+        bodySprite.fillColor = multiplayerColor.spriteColor
         bodySprite.strokeColor = .white
         bodySprite.lineWidth = 2
         addChild(bodySprite)
@@ -99,6 +104,24 @@ final class PlayerNode: SKNode {
         gunSprite.fillColor = weapon.color
     }
 
+    func apply(multiplayerColor: MultiplayerPlayerColor) {
+        self.multiplayerColor = multiplayerColor
+        bodySprite.fillColor = multiplayerColor.spriteColor
+    }
+
+    func apply(multiplayerState state: MultiplayerPlayerState) {
+        currentHealth = CGFloat(state.health)
+        currentWeapon = state.weapon
+        appliedPowerUps = Set(state.powerUps)
+        zRotation = state.rotationAngle
+        apply(multiplayerColor: state.color)
+        gunSprite.fillColor = currentWeapon.color
+    }
+
+    func apply(multiplayerHealth health: CGFloat) {
+        currentHealth = max(0, min(maxHealth, health))
+    }
+
     @discardableResult
     func apply(powerUp: PowerUpType) -> Bool {
         guard appliedPowerUps.insert(powerUp).inserted else { return false }
@@ -115,7 +138,7 @@ final class PlayerNode: SKNode {
         bodySprite.run(.sequence([
             .wait(forDuration: Self.hitFlashDuration),
             .run { [weak self] in
-                self?.bodySprite.fillColor = SKColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1.0)
+                self?.bodySprite.fillColor = self?.multiplayerColor.spriteColor ?? MultiplayerPlayerColor.blue.spriteColor
             }
         ]), withKey: "damageFlash")
     }
@@ -145,6 +168,8 @@ final class PlayerNode: SKNode {
         currentHealth = maxHealth
         regenerationCooldownRemaining = 0
         currentWeapon = .pistol
+        multiplayerColor = .blue
+        bodySprite.fillColor = multiplayerColor.spriteColor
         appliedPowerUps.removeAll()
         equip(weapon: .pistol)
     }
