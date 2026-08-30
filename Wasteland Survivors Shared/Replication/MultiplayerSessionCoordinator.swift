@@ -36,21 +36,35 @@ enum MultiplayerSessionRole: Equatable, Sendable {
 }
 
 @MainActor
-final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
+protocol MultiplayerGameplayReplication: AnyObject {
+    var role: MultiplayerSessionRole { get }
+    var hostID: String? { get }
+    var currentEventSequence: UInt64 { get }
+    func start()
+    func consumePlayerInputs() -> [PlayerInput]
+    func submitPlayerInput(_ input: PlayerInput)
+    func publishSimulationStep(_ step: SimulationStep)
+    func publishGameplayEvents(_ events: [GameplayEvent], tick: UInt64)
+}
+
+@MainActor
+final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, MultiplayerGameplayReplication {
     private let transport: MultiplayerTransport
     private var sessionID: String
     private let startedAt: TimeInterval
     private let protocolVersion: Int
     private var acceptedPeerIDs: Set<String> = []
     private var latestInputSequences: [String: UInt64] = [:]
-    private var latestSnapshotSequence: UInt64?
-    private var latestAcknowledgedInputSequences: [String: UInt64] = [:]
     private var acknowledgedInputSequencesStorage: [String: UInt64] = [:]
     private var queuedInputs: [MultiplayerPlayerInput] = []
     private var latestInputs: [String: MultiplayerPlayerInput] = [:]
     private var lastInputReceiveLogTime: TimeInterval = 0
     private var lastInputConsumeLogTime: TimeInterval = 0
     private var appliedEvents = AppliedEventStore()
+    private var nextGameplayEventSequence: UInt64 = 0
+    private var lastReceivedEventSequence: UInt64 = 0
+    private var lastPublishedTransforms: [String: (CGPointValue, Double)] = [:]
+    private var eventReplicationSystem: EventReplicationSystem?
     private var hasSentHello = false
 
     private(set) var role: MultiplayerSessionRole = .idle
@@ -65,6 +79,14 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
     var onHostLost: ((String) -> Void)?
     var onInput: ((MultiplayerPlayerInput) -> Void)?
     var onGameplayEvent: ((MultiplayerGameplayEvent) -> Void)?
+    var onEvent: ((MultiplayerEventEnvelope) -> Void)?
+    var onInitialization: ((MultiplayerInitializationPayload) -> Void)?
+    var onRecovery: ((MultiplayerRecoveryPayload) -> Void)?
+    var initializationProvider: ((String) -> MultiplayerInitializationPayload?)?
+    var recoveryProvider: ((UInt64) -> MultiplayerRecoveryPayload?)?
+    var onRecoveryRequested: ((UInt64) -> Void)?
+    var currentEventSequence: UInt64 { nextGameplayEventSequence }
+    var configuration = EventReplicationConfiguration()
     var onMessage: ((MultiplayerWireMessage) -> Void)?
     var onTransportError: ((MultiplayerTransportError) -> Void)?
 
@@ -108,12 +130,12 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         hostID = nil
         acceptedPeerIDs.removeAll()
         latestInputSequences.removeAll()
-        latestSnapshotSequence = nil
-        latestAcknowledgedInputSequences.removeAll()
         acknowledgedInputSequencesStorage.removeAll()
         queuedInputs.removeAll()
         latestInputs.removeAll()
         appliedEvents = AppliedEventStore()
+        eventReplicationSystem = nil
+        lastReceivedEventSequence = 0
     }
 
     func consumeQueuedInputs() -> [MultiplayerPlayerInput] {
@@ -144,6 +166,76 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         return inputsToApply
     }
 
+    func consumePlayerInputs() -> [PlayerInput] {
+        consumeQueuedInputs().map {
+            PlayerInput(
+                playerID: $0.playerID,
+                sequence: $0.sequence,
+                movement: CGPointValue($0.movement),
+                aimAngle: $0.aimAngle,
+                wantsToAttack: $0.wantsToAttack,
+                attackTargetID: $0.attackTargetID,
+                wantsToOpenChestID: $0.wantsToOpenChestID,
+                wantsToCollectPowerUpID: $0.wantsToCollectPowerUpID
+            )
+        }
+    }
+
+    func submitPlayerInput(_ input: PlayerInput) {
+        guard role == .client, input.playerID == transport.localPeerID,
+              let hostID else { return }
+        send(.playerInput(MultiplayerPlayerInput(
+            playerID: input.playerID,
+            sequence: input.sequence,
+            movement: CGVector(dx: input.movement.x, dy: input.movement.y),
+            aimAngle: CGFloat(input.aimAngle),
+            wantsToAttack: input.wantsToAttack,
+            attackTargetID: input.attackTargetID,
+            wantsToOpenChestID: input.wantsToOpenChestID,
+            wantsToCollectPowerUpID: input.wantsToCollectPowerUpID
+        )), to: hostID)
+    }
+
+    func publishSimulationStep(_ step: SimulationStep) {
+        for player in step.state.players {
+            let transform = (player.position, player.rotation)
+            guard lastPublishedTransforms[player.id]?.0 != transform.0 || lastPublishedTransforms[player.id]?.1 != transform.1 else { continue }
+            lastPublishedTransforms[player.id] = transform
+            publishEvent(.playerTransformChanged(playerID: player.id, position: player.position, facing: player.rotation), tick: step.state.tick)
+        }
+        publishGameplayEvents(step.events, tick: step.state.tick)
+    }
+
+    func publishGameplayEvents(_ events: [GameplayEvent], tick: UInt64) {
+        for event in events {
+            publishEvent(MultiplayerSyncEvent(gameplayEvent: event, sourcePlayerID: transport.localPeerID), tick: tick)
+        }
+    }
+
+    private func publishEvent(_ event: MultiplayerSyncEvent, tick: UInt64) {
+        nextGameplayEventSequence &+= 1
+        let envelope = MultiplayerEventEnvelope(
+            sessionID: sessionID,
+            sequence: nextGameplayEventSequence,
+            simulationTick: tick,
+            senderID: transport.localPeerID,
+            payload: event,
+            delivery: event.isMovementEvent ? configuration.movementDelivery : .reliable
+        )
+        for peerID in transport.connectedPeerIDs where peerID != transport.localPeerID {
+            send(.event(envelope), to: peerID)
+        }
+    }
+
+    func publishInitialization(for peerID: String) {
+        guard role == .host, let payload = initializationProvider?(peerID) else { return }
+        send(.initialization(payload), to: peerID)
+    }
+
+    func publishRecovery(_ payload: MultiplayerRecoveryPayload, to peerID: String) {
+        send(.recovery(payload), to: peerID)
+    }
+
     func broadcastGameplayEvent(_ event: GameplayEvent, sequence: UInt64, tick: UInt64) {
         guard role == .host else { return }
         send(.gameplayEvent(MultiplayerGameplayEvent(
@@ -171,8 +263,6 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
             hostID = nil
             acceptedPeerIDs.removeAll()
             latestInputSequences.removeAll()
-            latestSnapshotSequence = nil
-            latestAcknowledgedInputSequences.removeAll()
             queuedInputs.removeAll()
             latestInputs.removeAll()
             appliedEvents = AppliedEventStore()
@@ -189,11 +279,26 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         queuedInputs.removeAll { $0.playerID == peerID }
 
         if hostID == peerID, role == .client {
-            onHostLost?(peerID)
-            hostID = nil
-            latestAcknowledgedInputSequences.removeAll()
-            appliedEvents = AppliedEventStore()
-            updateRole(.disconnected)
+            let candidates = Set(transport.connectedPeerIDs).union([transport.localPeerID])
+            guard let nextHost = MultiplayerHostElection.select(sessionID: sessionID, candidates: candidates) else {
+                onHostLost?(peerID)
+                hostID = nil
+                appliedEvents = AppliedEventStore()
+                updateRole(.disconnected)
+                return
+            }
+            hostID = nextHost
+            if nextHost == transport.localPeerID {
+                becomeHost()
+                send(.hostAnnouncement(MultiplayerHostAnnouncement(
+                    sessionID: sessionID,
+                    hostID: transport.localPeerID,
+                    hostStartedAt: startedAt,
+                    protocolVersion: protocolVersion
+                )))
+            } else {
+                updateRole(.client)
+            }
         }
     }
 
@@ -211,27 +316,13 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         guard isAuthorized(message, from: peerID) else {
             return
         }
-        if handle(message) {
+        if handle(message, from: peerID) {
             onMessage?(message)
         }
     }
 
     private func isAuthorized(_ message: MultiplayerWireMessage, from peerID: String) -> Bool {
         switch message {
-        case let .playerUpdate(state):
-            // Player updates are a compatibility path from older builds. They
-            // are host-to-client only and can never mutate host authority.
-            return role == .client && hostID == peerID && state.id == peerID
-        case let .boardSnapshot(board):
-            guard role == .client, hostID == peerID, board.hostID == hostID else { return false }
-            guard (try? board.validate(expectedHostID: peerID)) != nil else { return false }
-            guard board.acknowledgedInputSequences.allSatisfy({ playerID, sequence in
-                latestAcknowledgedInputSequences[playerID].map { sequence >= $0 } ?? true
-            }) else { return false }
-            guard latestSnapshotSequence.map({ board.sequence > $0 }) ?? true else { return false }
-            latestSnapshotSequence = board.sequence
-            latestAcknowledgedInputSequences.merge(board.acknowledgedInputSequences) { _, incoming in incoming }
-            return true
         case let .gameplayEvent(event):
             guard role == .client, hostID == peerID else { return false }
             do {
@@ -240,6 +331,20 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
             } catch {
                 return false
             }
+        case let .event(event):
+            guard !event.senderID.isEmpty,
+                  event.senderID == peerID,
+                  event.sessionID == sessionID,
+                  event.sequence > 0,
+                  event.simulationTick > 0 else { return false }
+            return true
+        case let .initialization(payload):
+            guard payload.protocolVersion == protocolVersion,
+                  payload.sessionID == sessionID,
+                  payload.hostID == peerID else { return false }
+            return true
+        case let .recovery(payload):
+            return payload.sessionID == sessionID
         default:
             return true
         }
@@ -251,29 +356,65 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate {
         case let .hostAnnouncement(announcement): return announcement.hostID == peerID
         case let .joinRequest(request): return request.peerID == peerID
         case let .joinAccepted(accepted): return accepted.hostID == peerID
-        case let .playerUpdate(state): return state.id == peerID
-        case let .boardSnapshot(board): return board.hostID == peerID
-        case let .compactSnapshot(snapshot): return snapshot.hostID == peerID
         case let .playerInput(input): return input.playerID == peerID
         case let .gameplayEvent(event): return event.hostID == peerID
+        case let .initialization(payload): return payload.hostID == peerID
+        case let .event(envelope): return envelope.senderID == peerID
+        case .recovery: return true
         }
     }
 
     @discardableResult
-    private func handle(_ message: MultiplayerWireMessage) -> Bool {
+    private func handle(_ message: MultiplayerWireMessage, from peerID: String? = nil) -> Bool {
         switch message {
         case let .hello(hello): handle(hello)
         case let .hostAnnouncement(announcement): handle(announcement)
         case let .joinRequest(request): handle(request)
         case let .joinAccepted(accepted): handle(accepted)
         case let .playerInput(input): handle(input)
-        case .playerUpdate, .boardSnapshot, .compactSnapshot: return true
         case let .gameplayEvent(event):
             guard appliedEvents.insertIfNew(
                 event.event,
                 key: "\(event.sessionID):\(event.sequence)"
             ) else { return false }
             onGameplayEvent?(event)
+            return true
+        case let .initialization(payload):
+            var system = EventReplicationSystem(localPlayerID: transport.localPeerID, sessionID: payload.sessionID)
+            guard system.receive(payload, from: peerID) == .accepted else { return false }
+            eventReplicationSystem = system
+            lastReceivedEventSequence = payload.sequence
+            nextGameplayEventSequence = max(nextGameplayEventSequence, payload.sequence)
+            onInitialization?(payload)
+            return true
+        case let .event(event):
+            if case let .event(event) = message {
+                guard event.sequence > lastReceivedEventSequence else { return false }
+                guard event.sequence == lastReceivedEventSequence + 1 else {
+                    onRecoveryRequested?(lastReceivedEventSequence + 1)
+                    if let recovery = recoveryProvider?(lastReceivedEventSequence + 1) {
+                        send(.recovery(recovery), to: peerID ?? transport.localPeerID)
+                    }
+                    return false
+                }
+                guard appliedEvents.insertIfNew(
+                    .matchEnded,
+                    key: "\(event.sessionID):\(event.sequence)"
+                ) else { return false }
+                if var system = eventReplicationSystem {
+                    guard system.receive(event) == .accepted else { return false }
+                    eventReplicationSystem = system
+                }
+                lastReceivedEventSequence = event.sequence
+                nextGameplayEventSequence = max(nextGameplayEventSequence, event.sequence)
+                onEvent?(event)
+            }
+            return true
+        case let .recovery(payload):
+            guard var system = eventReplicationSystem,
+                  system.apply(payload) == .accepted else { return false }
+            eventReplicationSystem = system
+            onRecovery?(payload)
             return true
         }
         return true

@@ -118,6 +118,10 @@ final class PlayerNode: SKNode {
         gunSprite.fillColor = currentWeapon.color
     }
 
+    func apply(multiplayerHealth health: CGFloat) {
+        currentHealth = max(0, min(maxHealth, health))
+    }
+
     @discardableResult
     func apply(powerUp: PowerUpType) -> Bool {
         guard appliedPowerUps.insert(powerUp).inserted else { return false }

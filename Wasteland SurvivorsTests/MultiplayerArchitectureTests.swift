@@ -453,60 +453,6 @@ struct MultiplayerArchitectureTests {
         #expect(result.events.isEmpty)
     }
 
-    @Test("Snapshots reject stale sequences and unauthorized owners")
-    func snapshotsRejectStaleAndUnauthorizedOwners() throws {
-        // Given an authoritative snapshot envelope owned by host.
-        let state = GameState.initial(seed: 1, playerID: "player")
-        let snapshot = AuthoritativeSnapshot(
-            sequence: 4,
-            tick: 8,
-            serverTime: 1,
-            hostID: "host",
-            state: state
-        )
-        let envelope = try snapshot.envelope()
-
-        // When the envelope is validated with a different owner or old sequence.
-        #expect(throws: ReplicationError.unauthorizedOwner) {
-            try envelope.validate(expectedOwnerID: "attacker")
-        }
-        #expect(throws: ReplicationError.staleSequence) {
-            try envelope.validate(latestSequence: 4)
-        }
-        #expect(throws: ReplicationError.inconsistentState) {
-            try AuthoritativeSnapshot.from(envelope, expectedHostID: "host")
-        }
-    }
-
-    @Test("Snapshot history retains ordered bounded state")
-    func snapshotHistoryIsOrderedAndBounded() {
-        // Given a history with a capacity of two.
-        var history = SnapshotHistory(capacity: 2)
-        let state = GameState.initial(seed: 1, playerID: "player")
-
-        // When three ordered snapshots are appended.
-        for sequence in 1...3 {
-            _ = history.append(AuthoritativeSnapshot(
-                sequence: UInt64(sequence),
-                tick: UInt64(sequence),
-                serverTime: Double(sequence),
-                hostID: "host",
-                state: state
-            ))
-        }
-
-        // Then only the newest two snapshots remain and stale values are rejected.
-        #expect(history.snapshots.map(\.sequence) == [2, 3])
-        let acceptedDuplicate = history.append(AuthoritativeSnapshot(
-            sequence: 3,
-            tick: 3,
-            serverTime: 3,
-            hostID: "host",
-            state: state
-        ))
-        #expect(!acceptedDuplicate)
-    }
-
     @Test("Gameplay events are applied exactly once")
     func gameplayEventsAreDeduplicated() {
         // Given an empty event store and one event ID.

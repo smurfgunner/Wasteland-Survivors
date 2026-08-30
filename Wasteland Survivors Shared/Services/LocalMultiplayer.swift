@@ -64,6 +64,18 @@ enum MultiplayerHostSelector {
     }
 }
 
+enum MultiplayerSpawnPlanner {
+    static let spawnRadius: CGFloat = 80
+
+    static func color(localID: String, remoteID: String) -> MultiplayerPlayerColor {
+        localID < remoteID ? .blue : .red
+    }
+
+    static func position(forPlayerIndex index: Int, hostPosition: CGPoint) -> CGPoint {
+        CGPoint(x: hostPosition.x + spawnRadius * CGFloat(index), y: hostPosition.y)
+    }
+}
+
 struct MultiplayerZombieState: Codable, Equatable, Sendable {
     let id: String
     let x: Double
@@ -115,120 +127,12 @@ struct MultiplayerProjectileState: Codable, Equatable, Sendable {
     }
 }
 
-struct MultiplayerBoardState: Codable, Equatable, Sendable {
-    let sequence: UInt64
-    let simulationTick: UInt64
-    let seed: UInt64
-    let timestamp: TimeInterval
-    let serverTime: TimeInterval
-    let hostID: String
-    var stateHash: UInt64
-    let players: [MultiplayerPlayerState]
-    let zombies: [MultiplayerZombieState]
-    let chests: [MultiplayerChestState]
-    let powerUps: [MultiplayerPowerUpState]
-    let projectiles: [MultiplayerProjectileState]
-    let killCount: Int
-    let isGameOver: Bool
-    let acknowledgedInputSequences: [String: UInt64]
-    let lastAttackTickByPlayer: [String: UInt64]
-    let lastDamageTickByPlayer: [String: UInt64]
-
-    init(sequence: UInt64 = 0, simulationTick: UInt64 = 0, seed: UInt64 = 0, timestamp: TimeInterval = 0, serverTime: TimeInterval = 0, hostID: String, stateHash: UInt64 = 0, players: [MultiplayerPlayerState], zombies: [MultiplayerZombieState], chests: [MultiplayerChestState], powerUps: [MultiplayerPowerUpState], projectiles: [MultiplayerProjectileState], killCount: Int, isGameOver: Bool = false, acknowledgedInputSequences: [String: UInt64] = [:], lastAttackTickByPlayer: [String: UInt64] = [:], lastDamageTickByPlayer: [String: UInt64] = [:]) {
-        self.sequence = sequence
-        self.simulationTick = simulationTick
-        self.seed = seed
-        self.timestamp = timestamp
-        self.serverTime = serverTime
-        self.hostID = hostID
-        self.stateHash = stateHash
-        self.players = players
-        self.zombies = zombies
-        self.chests = chests
-        self.powerUps = powerUps
-        self.projectiles = projectiles
-        self.killCount = killCount
-        self.isGameOver = isGameOver
-        self.acknowledgedInputSequences = acknowledgedInputSequences
-        self.lastAttackTickByPlayer = lastAttackTickByPlayer
-        self.lastDamageTickByPlayer = lastDamageTickByPlayer
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        sequence = try container.decodeIfPresent(UInt64.self, forKey: .sequence) ?? 0
-        simulationTick = try container.decodeIfPresent(UInt64.self, forKey: .simulationTick) ?? 0
-        seed = try container.decodeIfPresent(UInt64.self, forKey: .seed) ?? 0
-        timestamp = try container.decodeIfPresent(TimeInterval.self, forKey: .timestamp) ?? 0
-        serverTime = try container.decodeIfPresent(TimeInterval.self, forKey: .serverTime) ?? timestamp
-        hostID = try container.decode(String.self, forKey: .hostID)
-        stateHash = try container.decodeIfPresent(UInt64.self, forKey: .stateHash) ?? 0
-        players = try container.decode([MultiplayerPlayerState].self, forKey: .players)
-        zombies = try container.decode([MultiplayerZombieState].self, forKey: .zombies)
-        chests = try container.decode([MultiplayerChestState].self, forKey: .chests)
-        powerUps = try container.decode([MultiplayerPowerUpState].self, forKey: .powerUps)
-        projectiles = try container.decode([MultiplayerProjectileState].self, forKey: .projectiles)
-        killCount = try container.decode(Int.self, forKey: .killCount)
-        isGameOver = try container.decodeIfPresent(Bool.self, forKey: .isGameOver) ?? false
-        acknowledgedInputSequences = try container.decodeIfPresent([String: UInt64].self, forKey: .acknowledgedInputSequences) ?? [:]
-        lastAttackTickByPlayer = try container.decodeIfPresent([String: UInt64].self, forKey: .lastAttackTickByPlayer) ?? [:]
-        lastDamageTickByPlayer = try container.decodeIfPresent([String: UInt64].self, forKey: .lastDamageTickByPlayer) ?? [:]
-    }
-
-    func validate(expectedHostID: String? = nil) throws {
-        guard !hostID.isEmpty, expectedHostID.map({ hostID == $0 }) ?? true,
-              killCount >= 0,
-              players.allSatisfy({
-                  !$0.id.isEmpty && $0.x.isFinite && $0.y.isFinite &&
-                  $0.health.isFinite && $0.health >= 0 && $0.rotation.isFinite
-              }),
-              zombies.allSatisfy({
-                  !$0.id.isEmpty && $0.x.isFinite && $0.y.isFinite &&
-                  $0.health.isFinite && $0.health >= 0 && $0.rotation.isFinite
-              }),
-              chests.allSatisfy({
-                  !$0.id.isEmpty && $0.x.isFinite && $0.y.isFinite
-              }),
-              powerUps.allSatisfy({
-                  !$0.id.isEmpty && $0.x.isFinite && $0.y.isFinite
-              }),
-              projectiles.allSatisfy({
-                  !$0.id.isEmpty && !$0.ownerID.isEmpty && $0.x.isFinite && $0.y.isFinite &&
-                  $0.angle.isFinite && $0.damage.isFinite && $0.damage > 0
-              }),
-              acknowledgedInputSequences.keys.allSatisfy({ acknowledgedID in
-                  !acknowledgedID.isEmpty && players.contains(where: { player in player.id == acknowledgedID })
-              }) else {
-            throw ReplicationError.malformedPayload
-        }
-        if stateHash != 0, stateHash != contentHash {
-            throw ReplicationError.inconsistentState
-        }
-    }
-
-    /// Hashes the complete wire representation without the hash field itself.
-    /// This permits clients to detect tampering or partial snapshots without
-    /// needing private simulation-only bookkeeping such as cooldown maps.
-    var contentHash: UInt64 {
-        var canonical = self
-        canonical.stateHash = 0
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let data = try? encoder.encode(canonical) else { return 0 }
-        return ReplicationStateHasher.hash(data)
-    }
-
-    static func empty(hostID: String, sequence: UInt64) -> Self {
-        Self(sequence: sequence, timestamp: 0, hostID: hostID, players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-    }
-}
-
 extension MultiplayerWireMessage {
     var deliveryPolicy: MultiplayerDeliveryPolicy {
         switch self {
-        case .playerUpdate, .boardSnapshot, .compactSnapshot, .playerInput:
+        case .playerInput:
             return .replaceable
-        case .gameplayEvent, .hello, .hostAnnouncement, .joinRequest, .joinAccepted:
+        case .gameplayEvent, .hello, .hostAnnouncement, .joinRequest, .joinAccepted, .initialization, .event, .recovery:
             return .reliable
         }
     }
@@ -269,31 +173,6 @@ struct MultiplayerPlayerInput: Codable, Equatable, Sendable {
     var movement: CGVector { CGVector(dx: movementX, dy: movementY) }
 }
 
-struct MultiplayerCompactPlayerState: Codable, Equatable, Sendable {
-    let id: String
-    let x: Double
-    let y: Double
-    let rotation: Double
-    let health: Double
-    let attackTargetID: String?
-}
-
-struct MultiplayerZombieTargetOverride: Codable, Equatable, Sendable {
-    let zombieID: String
-    let targetPlayerID: String?
-    let effectiveTick: UInt64
-}
-
-struct MultiplayerCompactSnapshot: Codable, Equatable, Sendable {
-    let sequence: UInt64
-    let simulationTick: UInt64
-    let seed: UInt64
-    let hostID: String
-    let players: [MultiplayerCompactPlayerState]
-    let zombieTargetOverrides: [MultiplayerZombieTargetOverride]
-    let acknowledgedInputSequences: [String: UInt64]
-}
-
 struct MultiplayerGameplayEvent: Codable, Equatable, Sendable {
     let event: GameplayEvent
     let sessionID: String
@@ -332,98 +211,16 @@ struct MultiplayerGameplayEvent: Codable, Equatable, Sendable {
     }
 }
 
-struct MultiplayerSnapshotBuffer {
-    private(set) var snapshots: [MultiplayerBoardState] = []
-    private var tickOrderedSnapshots: [MultiplayerBoardState] = []
-    let capacity: Int
-
-    var latest: MultiplayerBoardState? {
-        snapshots.last
-    }
-
-    init(capacity: Int = 32) {
-        self.capacity = max(2, capacity)
-    }
-
-    mutating func append(_ snapshot: MultiplayerBoardState) -> Bool {
-        guard !snapshots.contains(where: { $0.sequence == snapshot.sequence }),
-              snapshots.first.map({ snapshot.sequence > $0.sequence }) ?? true else { return false }
-
-        snapshots.append(snapshot)
-        snapshots.sort { $0.sequence < $1.sequence }
-        tickOrderedSnapshots.append(snapshot)
-        tickOrderedSnapshots.sort { $0.simulationTick < $1.simulationTick }
-        if snapshots.count > capacity {
-            let removedCount = snapshots.count - capacity
-            let removed = snapshots.prefix(removedCount)
-            let removedSequences = Set(removed.map(\.sequence))
-            snapshots.removeFirst(removedCount)
-            tickOrderedSnapshots.removeAll { removedSequences.contains($0.sequence) }
-        }
-        return true
-    }
-
-    func surrounding(tick: UInt64) -> (before: MultiplayerBoardState, after: MultiplayerBoardState)? {
-        guard let afterIndex = tickOrderedSnapshots.firstIndex(where: { $0.simulationTick >= tick }),
-              afterIndex > 0 else {
-            return nil
-        }
-        return (tickOrderedSnapshots[afterIndex - 1], tickOrderedSnapshots[afterIndex])
-    }
-
-    func position(
-        for entityID: String,
-        renderTick: UInt64,
-        delayTicks: UInt64,
-        maxExtrapolationTicks: UInt64
-    ) -> CGPoint? {
-        guard !snapshots.isEmpty else { return nil }
-        let targetTick = renderTick > delayTicks ? renderTick - delayTicks : 0
-        let ordered = tickOrderedSnapshots
-        func point(in snapshot: MultiplayerBoardState) -> CGPoint? {
-            if let player = snapshot.players.first(where: { $0.id == entityID }) { return player.position }
-            if let zombie = snapshot.zombies.first(where: { $0.id == entityID }) { return CGPoint(x: zombie.x, y: zombie.y) }
-            if let chest = snapshot.chests.first(where: { $0.id == entityID }) { return CGPoint(x: chest.x, y: chest.y) }
-            if let powerUp = snapshot.powerUps.first(where: { $0.id == entityID }) { return CGPoint(x: powerUp.x, y: powerUp.y) }
-            return nil
-        }
-        guard let first = ordered.first, let firstPoint = point(in: first) else { return nil }
-        if targetTick <= first.simulationTick { return firstPoint }
-        if let afterIndex = ordered.firstIndex(where: { $0.simulationTick >= targetTick }) {
-            guard afterIndex > 0, let beforePoint = point(in: ordered[afterIndex - 1]), let afterPoint = point(in: ordered[afterIndex]) else {
-                return point(in: ordered[afterIndex])
-            }
-            let beforeTick = ordered[afterIndex - 1].simulationTick
-            let span = max(1, ordered[afterIndex].simulationTick - beforeTick)
-            let factor = CGFloat(targetTick - beforeTick) / CGFloat(span)
-            return CGPoint(
-                x: beforePoint.x + (afterPoint.x - beforePoint.x) * factor,
-                y: beforePoint.y + (afterPoint.y - beforePoint.y) * factor
-            )
-        }
-        guard let latest = ordered.last, let latestPoint = point(in: latest), ordered.count >= 2,
-              let previousPoint = point(in: ordered[ordered.count - 2]) else { return firstPoint }
-        let previous = ordered[ordered.count - 2]
-        let span = max(1, latest.simulationTick - previous.simulationTick)
-        let extrapolation = min(maxExtrapolationTicks, targetTick - latest.simulationTick)
-        let factor = CGFloat(extrapolation) / CGFloat(span)
-        return CGPoint(
-            x: latestPoint.x + (latestPoint.x - previousPoint.x) * factor,
-            y: latestPoint.y + (latestPoint.y - previousPoint.y) * factor
-        )
-    }
-}
-
 enum MultiplayerWireMessage: Codable, Equatable, Sendable {
     case hello(MultiplayerHello)
     case hostAnnouncement(MultiplayerHostAnnouncement)
     case joinRequest(MultiplayerJoinRequest)
     case joinAccepted(MultiplayerJoinAccepted)
-    case playerUpdate(MultiplayerPlayerState)
-    case boardSnapshot(MultiplayerBoardState)
-    case compactSnapshot(MultiplayerCompactSnapshot)
     case playerInput(MultiplayerPlayerInput)
     case gameplayEvent(MultiplayerGameplayEvent)
+    case initialization(MultiplayerInitializationPayload)
+    case event(MultiplayerEventEnvelope)
+    case recovery(MultiplayerRecoveryPayload)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -431,11 +228,11 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case announcement
         case request
         case accepted
-        case player
-        case board
-        case compactSnapshot
         case input
         case gameplayEvent
+        case initialization
+        case event
+        case recovery
     }
 
     private enum MessageType: String, Codable {
@@ -443,11 +240,11 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case hostAnnouncement
         case joinRequest
         case joinAccepted
-        case playerUpdate
-        case boardSnapshot
-        case compactSnapshot
         case playerInput
         case gameplayEvent
+        case initialization
+        case event
+        case recovery
     }
 
     init(from decoder: Decoder) throws {
@@ -462,16 +259,16 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
             self = .joinRequest(try container.decode(MultiplayerJoinRequest.self, forKey: .request))
         case .joinAccepted:
             self = .joinAccepted(try container.decode(MultiplayerJoinAccepted.self, forKey: .accepted))
-        case .playerUpdate:
-            self = .playerUpdate(try container.decode(MultiplayerPlayerState.self, forKey: .player))
-        case .boardSnapshot:
-            self = .boardSnapshot(try container.decode(MultiplayerBoardState.self, forKey: .board))
-        case .compactSnapshot:
-            self = .compactSnapshot(try container.decode(MultiplayerCompactSnapshot.self, forKey: .compactSnapshot))
         case .playerInput:
             self = .playerInput(try container.decode(MultiplayerPlayerInput.self, forKey: .input))
         case .gameplayEvent:
             self = .gameplayEvent(try container.decode(MultiplayerGameplayEvent.self, forKey: .gameplayEvent))
+        case .initialization:
+            self = .initialization(try container.decode(MultiplayerInitializationPayload.self, forKey: .initialization))
+        case .event:
+            self = .event(try container.decode(MultiplayerEventEnvelope.self, forKey: .event))
+        case .recovery:
+            self = .recovery(try container.decode(MultiplayerRecoveryPayload.self, forKey: .recovery))
         }
     }
 
@@ -490,21 +287,21 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
         case let .joinAccepted(message):
             try container.encode(MessageType.joinAccepted, forKey: .type)
             try container.encode(message, forKey: .accepted)
-        case let .playerUpdate(player):
-            try container.encode(MessageType.playerUpdate, forKey: .type)
-            try container.encode(player, forKey: .player)
-        case let .boardSnapshot(board):
-            try container.encode(MessageType.boardSnapshot, forKey: .type)
-            try container.encode(board, forKey: .board)
-        case let .compactSnapshot(snapshot):
-            try container.encode(MessageType.compactSnapshot, forKey: .type)
-            try container.encode(snapshot, forKey: .compactSnapshot)
         case let .playerInput(input):
             try container.encode(MessageType.playerInput, forKey: .type)
             try container.encode(input, forKey: .input)
         case let .gameplayEvent(event):
             try container.encode(MessageType.gameplayEvent, forKey: .type)
             try container.encode(event, forKey: .gameplayEvent)
+        case let .initialization(payload):
+            try container.encode(MessageType.initialization, forKey: .type)
+            try container.encode(payload, forKey: .initialization)
+        case let .event(envelope):
+            try container.encode(MessageType.event, forKey: .type)
+            try container.encode(envelope, forKey: .event)
+        case let .recovery(payload):
+            try container.encode(MessageType.recovery, forKey: .type)
+            try container.encode(payload, forKey: .recovery)
         }
     }
 
@@ -514,22 +311,6 @@ enum MultiplayerWireMessage: Codable, Equatable, Sendable {
 
     static func decode(_ data: Data) throws -> Self {
         try JSONDecoder().decode(Self.self, from: data)
-    }
-}
-
-enum MultiplayerSpawnPlanner {
-    static let spawnRadius: CGFloat = 90
-
-    static func color(localID: String, remoteID: String) -> MultiplayerPlayerColor {
-        localID < remoteID ? .blue : .red
-    }
-
-    static func position(forPlayerIndex index: Int, hostPosition: CGPoint) -> CGPoint {
-        let angle = CGFloat(index) * (.pi / 2)
-        return CGPoint(
-            x: hostPosition.x + cos(angle) * spawnRadius,
-            y: hostPosition.y + sin(angle) * spawnRadius
-        )
     }
 }
 

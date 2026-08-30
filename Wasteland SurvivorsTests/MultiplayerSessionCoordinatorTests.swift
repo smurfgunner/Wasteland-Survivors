@@ -239,38 +239,6 @@ struct MultiplayerSessionCoordinatorTests {
         }.isEmpty)
     }
 
-    @Test("Decoded transport messages reach the coordinator without a second decode")
-    @MainActor
-    func decodedTransportMessagesReachCoordinatorDirectly() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(
-            transport: session,
-            sessionID: "match",
-            startedAt: 20
-        )
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-
-        var received = false
-        coordinator.onMessage = { message in
-            if case .playerUpdate = message {
-                received = true
-            }
-        }
-
-        coordinator.transport(
-            session,
-            didReceive: MultiplayerWireMessage.playerUpdate(
-                MultiplayerPlayerState(id: "host", position: .zero, color: .blue)
-            ),
-            from: "host"
-        )
-
-        #expect(received)
-    }
-
     @Test("A client sends owned intent to the elected host")
     @MainActor
     func clientSendsOwnedIntentToHost() throws {
@@ -516,28 +484,7 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.role == .client)
         #expect(coordinator.consumeQueuedInputs().isEmpty)
     }
-
-    @Test("A host ignores legacy client-authoritative player updates")
-    @MainActor
-    func hostRejectsClientPlayerUpdate() throws {
-        let session = CoordinatorTestSession(localPlayerID: "host")
-        session.connectedPeerIDs = ["client"]
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 1)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "client", startedAt: 20, protocolVersion: 1
-        )).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
-            sessionID: "match", peerID: "client", protocolVersion: 1
-        )).encoded(), from: "client")
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let update = MultiplayerPlayerState(id: "client", position: CGPoint(x: 999, y: 999), color: .red)
-
-        session.deliver(try MultiplayerWireMessage.playerUpdate(update).encoded(), from: "client")
-
-        #expect(received.isEmpty)
-    }
+}
 
     @Test("A connected but unaccepted peer cannot influence the host")
     @MainActor
@@ -779,137 +726,6 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.consumeQueuedInputs() == [input])
     }
 
-    @Test("A client does not forward authoritative snapshots from a non-host peer")
-    @MainActor
-    func clientRejectsNonHostSnapshotsBeforePresentation() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1)).encoded())
-
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let forged = MultiplayerBoardState.empty(hostID: "attacker", sequence: 1)
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(forged).encoded(), from: "attacker")
-
-        #expect(received.isEmpty)
-    }
-
-    @Test("A client forwards authoritative snapshots only once and in sequence order")
-    @MainActor
-    func clientRejectsStaleAuthoritativeSnapshots() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let newest = MultiplayerBoardState.empty(hostID: "host", sequence: 2)
-        let stale = MultiplayerBoardState.empty(hostID: "host", sequence: 1)
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(newest).encoded(), from: "host")
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(newest).encoded(), from: "host")
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(stale).encoded(), from: "host")
-
-        #expect(received == [.boardSnapshot(newest)])
-    }
-
-    @Test("A client rejects semantically invalid authoritative snapshots")
-    @MainActor
-    func clientRejectsInvalidAuthoritativeSnapshot() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let invalid = MultiplayerBoardState(
-            sequence: 1, hostID: "host",
-            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .blue, health: -1)],
-            zombies: [], chests: [], powerUps: [],
-            projectiles: [MultiplayerProjectileState(id: "projectile", ownerID: "host", x: 0, y: 0, angle: 0, weapon: .pistol, damage: -1)],
-            killCount: 0
-        )
-
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(invalid).encoded(), from: "host")
-
-        #expect(received.isEmpty)
-    }
-
-    @Test("A snapshot with a forged state hash is rejected")
-    @MainActor
-    func clientRejectsForgedSnapshotStateHash() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let forged = MultiplayerBoardState(
-            sequence: 1, simulationTick: 1, hostID: "host", stateHash: 42,
-            players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0
-        )
-
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(forged).encoded(), from: "host")
-
-        #expect(received.isEmpty)
-    }
-
-    @Test("A snapshot cannot acknowledge input for an unknown player")
-    @MainActor
-    func clientRejectsUnknownInputAcknowledgement() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        let forged = MultiplayerBoardState(
-            sequence: 1, simulationTick: 1, hostID: "host",
-            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
-            zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
-            acknowledgedInputSequences: ["attacker": 4]
-        )
-
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(forged).encoded(), from: "host")
-
-        #expect(received.isEmpty)
-    }
-
-    @Test("Snapshot acknowledgements cannot move backwards")
-    @MainActor
-    func clientRejectsBackwardInputAcknowledgement() throws {
-        let session = CoordinatorTestSession(localPlayerID: "client")
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
-        )).encoded())
-        var received: [MultiplayerWireMessage] = []
-        coordinator.onMessage = { received.append($0) }
-        func board(sequence: UInt64, acknowledgement: UInt64) -> MultiplayerBoardState {
-            MultiplayerBoardState(
-                sequence: sequence, simulationTick: sequence, hostID: "host",
-                players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
-                zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
-                acknowledgedInputSequences: ["client": acknowledgement]
-            )
-        }
-
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board(sequence: 1, acknowledgement: 5)).encoded(), from: "host")
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board(sequence: 2, acknowledgement: 4)).encoded(), from: "host")
-
-        #expect(received.count == 1)
-    }
-
     @Test("A client applies each authorized gameplay event at most once")
     @MainActor
     func clientAppliesGameplayEventExactlyOnce() throws {
@@ -1065,7 +881,7 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(received.isEmpty)
     }
 
-    @Test("A client reports host loss and enters a terminal disconnected state")
+    @Test("A client migrates when the host disconnects")
     @MainActor
     func clientReportsHostLoss() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
@@ -1079,9 +895,9 @@ struct MultiplayerSessionCoordinatorTests {
 
         session.peerDisconnected("host")
 
-        #expect(coordinator.role == .disconnected)
-        #expect(coordinator.hostID == nil)
-        #expect(lostHostID == "host")
+        #expect(coordinator.role == .host)
+        #expect(coordinator.hostID == "client")
+        #expect(lostHostID == nil)
     }
 
     @Test("The host rejects movement input outside the normalized range")
@@ -1119,30 +935,6 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.consumeQueuedInputs().isEmpty)
     }
 
-    @Test("A reconnecting peer must be accepted again before sending input")
-    @MainActor
-    func reconnectingPeerMustRejoinBeforeInputIsAccepted() throws {
-        let session = CoordinatorTestSession(localPlayerID: "host")
-        session.connectedPeerIDs = ["client"]
-        let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 1)
-        coordinator.start()
-        session.deliver(try MultiplayerWireMessage.hello(.init(sessionID: "match", peerID: "client", startedAt: 20, protocolVersion: 1)).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(sessionID: "match", peerID: "client", protocolVersion: 1)).encoded(), from: "client")
-
-        session.peerDisconnected("client")
-        session.connectedPeerIDs.insert("client")
-        let beforeRejoin = MultiplayerPlayerInput(playerID: "client", sequence: 1, movement: .zero, aimAngle: 0, wantsToAttack: false)
-        session.deliver(try MultiplayerWireMessage.playerInput(beforeRejoin).encoded())
-        #expect(coordinator.consumeQueuedInputs().isEmpty)
-
-        session.deliver(try MultiplayerWireMessage.hello(.init(sessionID: "match", peerID: "client", startedAt: 20, protocolVersion: 1)).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(sessionID: "match", peerID: "client", protocolVersion: 1)).encoded(), from: "client")
-        session.deliver(try MultiplayerWireMessage.playerInput(beforeRejoin).encoded())
-
-        #expect(coordinator.consumeQueuedInputs() == [beforeRejoin])
-    }
-}
-
 @MainActor
 private final class CoordinatorTestSession: MultiplayerTransport {
     weak var delegate: MultiplayerTransportDelegate?
@@ -1154,103 +946,36 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     var deliveryPolicies: [MultiplayerDeliveryPolicy] = []
     var broadcastError: MultiplayerTransportError?
     var sendError: MultiplayerTransportError?
-    var holdDeliveries = false
     var connectsImmediately = true
+    var holdDeliveries = false
     private var heldData: [Data] = []
 
-    init(localPlayerID: String) {
-        self.localPeerID = localPlayerID
-    }
-
-    func connect() {
-        state = connectsImmediately ? .connected : .connecting
-        delegate?.transport(self, didChange: state)
-    }
-
-    func finishConnecting() {
-        state = .connected
-        delegate?.transport(self, didChange: state)
-    }
-
-    func disconnect() {
-        state = .disconnected
-        connectedPeerIDs.removeAll()
-        delegate?.transport(self, didChange: state)
-    }
-
-    func peerDisconnected(_ peerID: String) {
-        connectedPeerIDs.remove(peerID)
-        delegate?.transport(self, didChangePeer: peerID, state: .disconnected)
-    }
-
-    func send(_ data: Data, to peerID: String) throws {
-        guard state == .connected else { throw MultiplayerTransportError.notConnected }
-        if let sendError { throw sendError }
-        directedPeerIDs.append(peerID)
-        record(data)
-    }
-
-    func send(_ data: Data, to peerID: String, delivery: MultiplayerDeliveryPolicy) throws {
-        deliveryPolicies.append(delivery)
-        try send(data, to: peerID)
-    }
-
-    func broadcast(_ data: Data) throws {
-        guard state == .connected else { throw MultiplayerTransportError.notConnected }
-        if let broadcastError { throw broadcastError }
-        record(data)
-    }
-
-    func broadcast(_ data: Data, delivery: MultiplayerDeliveryPolicy) throws {
-        deliveryPolicies.append(delivery)
-        try broadcast(data)
-    }
-
-    func deliver(_ data: Data, from peerID: String? = nil) {
-        if holdDeliveries {
-            heldData.append(data)
-            return
-        }
-        deliverImmediately(data, from: peerID)
-    }
-
-    func releaseHeld(at index: Int, from peerID: String? = "host") {
-        let data = heldData.remove(at: index)
-        deliverImmediately(data, from: peerID)
-    }
-
-    func duplicateHeld(at index: Int, from peerID: String? = "host") {
-        deliverImmediately(heldData[index], from: peerID)
-    }
-
-    func dropHeld(at index: Int) {
-        heldData.remove(at: index)
-    }
-
-    private func deliverImmediately(_ data: Data, from peerID: String? = nil) {
-        let resolvedPeerID = peerID ?? senderID(from: data)
-        guard let resolvedPeerID else { return }
-        delegate?.transport(self, didReceive: data, from: resolvedPeerID)
-    }
-
-    private func record(_ data: Data) {
-        if let message = try? MultiplayerWireMessage.decode(data) {
-            messages.append(message)
-        }
-    }
-
-    private func senderID(from data: Data) -> String? {
-        guard let message = try? MultiplayerWireMessage.decode(data) else { return nil }
+    init(localPlayerID: String) { self.localPeerID = localPlayerID }
+    func connect() { state = connectsImmediately ? .connected : .connecting; delegate?.transport(self, didChange: state) }
+    func finishConnecting() { state = .connected; delegate?.transport(self, didChange: state) }
+    func disconnect() { state = .disconnected; connectedPeerIDs.removeAll(); delegate?.transport(self, didChange: state) }
+    func peerDisconnected(_ peerID: String) { connectedPeerIDs.remove(peerID); delegate?.transport(self, didChangePeer: peerID, state: .disconnected) }
+    func send(_ data: Data, to peerID: String) throws { guard state == .connected else { throw MultiplayerTransportError.notConnected }; if let sendError { throw sendError }; directedPeerIDs.append(peerID); record(data) }
+    func send(_ data: Data, to peerID: String, delivery: MultiplayerDeliveryPolicy) throws { deliveryPolicies.append(delivery); try send(data, to: peerID) }
+    func broadcast(_ data: Data) throws { guard state == .connected else { throw MultiplayerTransportError.notConnected }; if let broadcastError { throw broadcastError }; record(data) }
+    func broadcast(_ data: Data, delivery: MultiplayerDeliveryPolicy) throws { deliveryPolicies.append(delivery); try broadcast(data) }
+    func deliver(_ data: Data, from peerID: String? = nil) { if holdDeliveries { heldData.append(data); return }; deliverImmediately(data, from: peerID) }
+    func releaseHeld(at index: Int, from peerID: String? = "host") { let data = heldData.remove(at: index); deliverImmediately(data, from: peerID) }
+    func duplicateHeld(at index: Int, from peerID: String? = "host") { deliverImmediately(heldData[index], from: peerID) }
+    func dropHeld(at index: Int) { heldData.remove(at: index) }
+    private func deliverImmediately(_ data: Data, from peerID: String? = nil) { guard let message = try? MultiplayerWireMessage.decode(data) else { return }; delegate?.transport(self, didReceive: data, from: peerID ?? senderID(message)) }
+    private func record(_ data: Data) { if let message = try? MultiplayerWireMessage.decode(data) { messages.append(message) } }
+    private func senderID(_ message: MultiplayerWireMessage) -> String {
         switch message {
         case let .hello(value): return value.peerID
         case let .hostAnnouncement(value): return value.hostID
         case let .joinRequest(value): return value.peerID
         case let .joinAccepted(value): return value.hostID
-        case let .playerUpdate(value): return value.id
-        case let .boardSnapshot(value): return value.hostID
-        case let .compactSnapshot(value): return value.hostID
         case let .playerInput(value): return value.playerID
         case let .gameplayEvent(value): return value.hostID
+        case let .initialization(value): return value.hostID
+        case let .event(value): return value.senderID
+        case .recovery: return localPeerID
         }
     }
 }

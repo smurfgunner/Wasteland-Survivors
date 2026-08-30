@@ -57,7 +57,7 @@ enum MultiplayerTransportError: Error, Equatable, Sendable {
     case peerUnavailable
 }
 
-enum MultiplayerDeliveryPolicy: Equatable, Sendable {
+enum MultiplayerDeliveryPolicy: Codable, Equatable, Sendable {
     case replaceable
     case reliable
 }

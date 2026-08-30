@@ -51,11 +51,11 @@ private final class FakeMultiplayerSession: MultiplayerTransport {
         case let .hostAnnouncement(value): senderID = value.hostID
         case let .joinRequest(value): senderID = value.peerID
         case let .joinAccepted(value): senderID = value.hostID
-        case let .playerUpdate(value): senderID = value.id
-        case let .boardSnapshot(value): senderID = value.hostID
-        case let .compactSnapshot(value): senderID = value.hostID
         case let .playerInput(value): senderID = value.playerID
         case let .gameplayEvent(value): senderID = value.hostID
+        case let .initialization(value): senderID = value.hostID
+        case let .event(value): senderID = value.senderID
+        case .recovery: senderID = peerID ?? "recovery"
         }
         delegate?.transport(self, didReceive: data, from: peerID ?? senderID)
     }
@@ -105,38 +105,6 @@ struct LocalMultiplayerTests {
         #expect(joiningPosition != hostPosition)
     }
 
-    @Test("Wraps and unwraps player updates through the network message")
-    func playerUpdateRoundTripsThroughWireMessage() throws {
-        let state = MultiplayerPlayerState(
-            id: "player-2",
-            position: CGPoint(x: 42, y: -18),
-            color: .green
-        )
-
-        let data = try MultiplayerWireMessage.playerUpdate(state).encoded()
-        let decoded = try MultiplayerWireMessage.decode(data)
-
-        #expect(decoded == .playerUpdate(state))
-    }
-
-    @Test("Round-trips the complete authoritative board snapshot")
-    func boardSnapshotRoundTripsThroughWireMessage() throws {
-        let board = MultiplayerBoardState(
-            hostID: "host",
-            players: [MultiplayerPlayerState(id: "host", position: .zero, color: .blue, health: 84, weapon: .rifle, powerUps: [.damage], rotation: 1.2)],
-            zombies: [MultiplayerZombieState(id: "zombie-1", x: 10, y: 20, health: 42, rotation: 0.5)],
-            chests: [MultiplayerChestState(id: "chest-1", x: 30, y: 40)],
-            powerUps: [MultiplayerPowerUpState(id: "powerup-1", x: 50, y: 60, type: .range)],
-            projectiles: [MultiplayerProjectileState(id: "projectile-1", x: 70, y: 80, angle: 0.4, weapon: .pistol, damage: 30)],
-            killCount: 7
-        )
-
-        let data = try MultiplayerWireMessage.boardSnapshot(board).encoded()
-        let decoded = try MultiplayerWireMessage.decode(data)
-
-        #expect(decoded == .boardSnapshot(board))
-    }
-
     @Test("The main menu exposes local multiplayer")
     @MainActor
     func mainMenuExposesLocalMultiplayer() {
@@ -182,117 +150,6 @@ struct LocalMultiplayerTests {
         player.apply(multiplayerColor: .purple)
 
         #expect(player.multiplayerColor == .purple)
-    }
-
-    @Test("Host publishes the complete live board to the network")
-    @MainActor
-    func hostPublishesBoardSnapshot() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "wasteland-survivors-local",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.connectedPeerIDs.insert("client")
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "wasteland-survivors-local",
-            peerID: "client",
-            startedAt: 9_999_999_999,
-            protocolVersion: 1
-        )).encoded())
-
-        scene.update(0)
-        scene.update(1)
-        scene.update(2)
-        scene.update(3)
-
-        let snapshotData = try #require(session.sentData.compactMap { data -> MultiplayerBoardState? in
-            guard case let .boardSnapshot(board) = try? MultiplayerWireMessage.decode(data) else { return nil }
-            return board
-        }.last)
-
-        #expect(session.started)
-        #expect(snapshotData.hostID == "host")
-        #expect(snapshotData.players.contains { $0.id == "host" })
-        #expect(!snapshotData.zombies.isEmpty)
-        #expect(!snapshotData.chests.isEmpty)
-        #expect(snapshotData.killCount == 0)
-        #expect(snapshotData.simulationTick == scene.authoritativeSimulationTick)
-        #expect(session.deliveryPolicies.contains(.replaceable))
-    }
-
-    @Test("Host transfers the current board immediately after accepting a late joiner")
-    @MainActor
-    func hostTransfersCurrentBoardToLateJoinerImmediately() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        scene.update(0)
-        scene.update(1)
-        scene.update(2)
-        scene.update(3)
-        session.connectedPeerIDs.insert("late-client")
-
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "late-client", startedAt: 9_999_999_999, protocolVersion: 1
-        )).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
-            sessionID: "match", peerID: "late-client", protocolVersion: 1
-        )).encoded(), from: "late-client")
-
-        let transferredBoard = try #require(session.sentData.compactMap { data -> MultiplayerBoardState? in
-            guard case let .boardSnapshot(board) = try? MultiplayerWireMessage.decode(data) else { return nil }
-            return board
-        }.last)
-
-
-        #expect(transferredBoard.hostID == "host")
-        #expect(transferredBoard.players.contains { $0.id == "host" })
-        #expect(!transferredBoard.chests.isEmpty)
-    }
-
-    @Test("Host renders and simulates a joined player on the shared world canvas")
-    @MainActor
-    func hostRendersJoinedPlayerOnSharedWorldCanvas() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.connectedPeerIDs.insert("client")
-
-        session.deliver(try MultiplayerWireMessage.hello(.init(
-            sessionID: "match", peerID: "client", startedAt: 9_999_999_999, protocolVersion: 1
-        )).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
-            sessionID: "match", peerID: "client", protocolVersion: 1
-        )).encoded(), from: "client")
-        session.deliver(try MultiplayerWireMessage.playerInput(.init(
-            playerID: "client", sequence: 1, movement: .zero, aimAngle: 0, wantsToAttack: false
-        )).encoded(), from: "client")
-
-        scene.update(0)
-        scene.update(1.0 / 60.0)
-
-        #expect(scene.remotePlayers["client"]?.parent === scene.worldNode)
-        let snapshot = try #require(session.sentData.compactMap { data -> MultiplayerBoardState? in
-            guard case let .boardSnapshot(board) = try? MultiplayerWireMessage.decode(data) else { return nil }
-            return board
-        }.last)
-        #expect(snapshot.players.contains { $0.id == "client" })
     }
 
     @Test("Authoritative simulation is independent of render frame partitioning")
@@ -373,161 +230,6 @@ struct LocalMultiplayerTests {
         #expect(scene.authoritativeSimulationTick == 1)
     }
 
-    @Test("Client applies the host board snapshot to its real scene")
-    @MainActor
-    func clientAppliesBoardSnapshot() async throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "wasteland-survivors-local",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "wasteland-survivors-local",
-            hostID: "host",
-            hostStartedAt: 1,
-            protocolVersion: 1
-        )).encoded())
-
-        let board = MultiplayerBoardState(
-            hostID: "host",
-            players: [
-                MultiplayerPlayerState(id: "host", position: CGPoint(x: 100, y: 100), color: .blue, health: 70, weapon: .rifle),
-                MultiplayerPlayerState(id: "client", position: CGPoint(x: 20, y: 30), color: .red, health: 80, weapon: .shotgun)
-            ],
-            zombies: [MultiplayerZombieState(id: "zombie-1", x: 40, y: 50, health: 45, rotation: 0)],
-            chests: [MultiplayerChestState(id: "chest-1", x: 60, y: 70)],
-            powerUps: [MultiplayerPowerUpState(id: "powerup-1", x: 80, y: 90, type: .damage)],
-            projectiles: [MultiplayerProjectileState(id: "projectile-1", ownerID: "host", x: 100, y: 110, angle: 0, weapon: .pistol, damage: 30)],
-            killCount: 12
-        )
-
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-
-        #expect(scene.killCount == 12)
-        #expect(scene.playerNode.position == CGPoint(x: 20, y: 30))
-        #expect(scene.playerNode.currentWeapon == WeaponType.shotgun)
-        #expect(scene.playerNode.currentHealth == 80)
-        #expect(scene.remotePlayers["host"]?.position == CGPoint(x: 100, y: 100))
-        #expect(scene.zombies.count == 1)
-        #expect(scene.chests.count == 1)
-        #expect(scene.powerUps.count == 1)
-        #expect(scene.worldNode.children.contains { $0 is ProjectileNode })
-
-        // Full snapshots are replacement messages: omitting an entity is an
-        // authoritative removal, not an instruction to retain the old node.
-        let clearedBoard = MultiplayerBoardState(
-            sequence: 1,
-            simulationTick: 1,
-            hostID: "host",
-            players: board.players,
-            zombies: [],
-            chests: board.chests,
-            powerUps: board.powerUps,
-            projectiles: [],
-            killCount: board.killCount
-        )
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(clearedBoard).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(scene.zombies.isEmpty)
-        #expect(scene.worldNode.children.contains { $0 is ProjectileNode } == false)
-    }
-
-    @Test("Client applies replicated remote player rotation to its real scene")
-    @MainActor
-    func clientAppliesReplicatedRemotePlayerRotationToRealScene() async throws {
-        // Given a client that has accepted the host and receives a rotated host state.
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "wasteland-survivors-local",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "wasteland-survivors-local",
-            hostID: "host",
-            hostStartedAt: 1,
-            protocolVersion: 1
-        )).encoded())
-
-        let expectedRotation = CGFloat.pi / 2
-        let board = MultiplayerBoardState(
-            sequence: 1,
-            simulationTick: 1,
-            hostID: "host",
-            players: [
-                MultiplayerPlayerState(
-                    id: "host",
-                    position: CGPoint(x: 100, y: 100),
-                    color: .blue,
-                    rotation: expectedRotation
-                ),
-                MultiplayerPlayerState(
-                    id: "client",
-                    position: .zero,
-                    color: .red
-                )
-            ],
-            zombies: [],
-            chests: [],
-            powerUps: [],
-            projectiles: [],
-            killCount: 0
-        )
-
-        // When the authoritative board snapshot is delivered.
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Then the remote player faces the replicated direction.
-        #expect(abs((scene.remotePlayers["host"]?.zRotation ?? 0) - expectedRotation) < 0.001)
-    }
-
-    @Test("Client keeps the remote player in the shared world after camera and interpolation updates")
-    @MainActor
-    func clientKeepsRemotePlayerInSharedWorldAfterRenderUpdates() async throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "match", hostID: "host", hostStartedAt: 1, protocolVersion: 1
-        )).encoded())
-
-        for tick in 1...4 {
-            let board = MultiplayerBoardState(
-                sequence: UInt64(tick),
-                simulationTick: UInt64(tick),
-                hostID: "host",
-                players: [
-                    MultiplayerPlayerState(id: "host", position: CGPoint(x: 100 + tick * 10, y: 100), color: .blue),
-                    MultiplayerPlayerState(id: "client", position: CGPoint(x: 0, y: 0), color: .red)
-                ],
-                zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0
-            )
-            session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded())
-            scene.update(Double(tick) / 60.0)
-        }
-
-        let remotePlayer = try #require(scene.remotePlayers["host"])
-        #expect(remotePlayer.parent === scene.worldNode)
-        #expect(scene.playerNode.parent === scene.worldNode)
-        #expect(scene.cameraNode.position == scene.playerNode.position)
-        #expect(scene.worldNode.convert(remotePlayer.position, to: scene) != scene.cameraNode.position)
-    }
-
     @Test("Host advances a joined player's authoritative position from peer input")
     @MainActor
     func hostAdvancesJoinedPlayerFromPeerInput() throws {
@@ -559,7 +261,7 @@ struct LocalMultiplayerTests {
         #expect(movedPosition.x > initialPosition.x)
     }
 
-    @Test("Client applies an authorized match-ended event to its presentation")
+    @Test("Client ignores deprecated match-ended messages outside the event contract")
     @MainActor
     func clientAppliesMatchEndedGameplayEvent() throws {
         let session = FakeMultiplayerSession(localPlayerID: "client")
@@ -584,10 +286,10 @@ struct LocalMultiplayerTests {
 
         session.deliver(try MultiplayerWireMessage.gameplayEvent(event).encoded(), from: "host")
 
-        #expect(scene.isGameOver)
+        #expect(scene.isGameOver == false)
     }
 
-    @Test("Client presents game over when the authoritative host disconnects")
+    @Test("Client migrates when the authoritative host disconnects")
     @MainActor
     func clientPresentsGameOverOnHostLoss() throws {
         let session = FakeMultiplayerSession(localPlayerID: "client")
@@ -605,152 +307,13 @@ struct LocalMultiplayerTests {
 
         session.peerDisconnected("host")
 
-        #expect(scene.isGameOver)
-    }
-
-    @Test("Client reconciliation replays only inputs not acknowledged by the host")
-    @MainActor
-    func clientReconcilesUnacknowledgedPrediction() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "wasteland-survivors-local",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
-        )).encoded())
-        scene.keysPressed.insert(13)
-        scene.update(0.001)
-        scene.update(0.001 + 1.0 / 60.0)
-
-        let board = MultiplayerBoardState(
-            sequence: 1, simulationTick: 0, hostID: "host",
-            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
-            zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
-            acknowledgedInputSequences: [:]
-        )
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded(), from: "host")
-
-        #expect(scene.playerNode.position.y > 0)
-    }
-
-    @Test("Client does not replay an input already acknowledged by the host")
-    @MainActor
-    func clientDropsAcknowledgedPrediction() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "wasteland-survivors-local",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1
-        )).encoded())
-        scene.keysPressed.insert(13)
-        scene.update(0.001)
-        scene.update(0.001 + 1.0 / 60.0)
-
-        let board = MultiplayerBoardState(
-            sequence: 1, simulationTick: 0, hostID: "host",
-            players: [MultiplayerPlayerState(id: "client", position: .zero, color: .red)],
-            zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0,
-            acknowledgedInputSequences: ["client": 1]
-        )
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(board).encoded(), from: "host")
-
-        let distanceFromAuthoritative = hypot(
-            scene.playerNode.position.x,
-            scene.playerNode.position.y
-        )
-        #expect(distanceFromAuthoritative <= 1)
-
-    }
-
-    @Test("Client preserves projectile node identity across snapshot updates")
-    @MainActor
-    func clientPreservesProjectileNodeIdentityAcrossSnapshots() async throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(sessionID: "wasteland-survivors-local", hostID: "host", hostStartedAt: 1, protocolVersion: 1)).encoded())
-
-        let first = MultiplayerBoardState(sequence: 1, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [MultiplayerProjectileState(id: "projectile", ownerID: "host", x: 10, y: 20, angle: 0, weapon: .pistol, damage: 30)], killCount: 0)
-        let second = MultiplayerBoardState(sequence: 2, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [MultiplayerProjectileState(id: "projectile", ownerID: "host", x: 30, y: 40, angle: 0.5, weapon: .pistol, damage: 30)], killCount: 0)
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(first).encoded())
-        try await Task.sleep(for: .milliseconds(20))
-        let projectile = try #require(scene.worldNode.children.compactMap { $0 as? ProjectileNode }.first)
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(second).encoded())
-        try await Task.sleep(for: .milliseconds(20))
-
-        #expect(scene.worldNode.children.compactMap { $0 as? ProjectileNode }.first === projectile)
-        #expect(projectile.position == CGPoint(x: 30, y: 40))
-    }
-
-    @Test("Client does not teleport when a delayed snapshot acknowledges predicted input")
-    @MainActor
-    func clientDoesNotTeleportWhenDelayedSnapshotAcknowledgesPredictedInput() throws {
-        // Given a client that has predicted continuous movement locally.
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)
-        )
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "match",
-            hostID: "host",
-            hostStartedAt: 1,
-            protocolVersion: 1
-        )).encoded())
-        scene.movementVector = CGVector(dx: 1, dy: 0)
-        scene.update(0)
-        for frame in 1...12 {
-            scene.update(Double(frame) / 60.0)
-        }
-        let predictedPosition = scene.playerNode.position
-
-        // When an older authoritative position acknowledges the pending inputs.
-        let delayedBoard = MultiplayerBoardState(
-            sequence: 2,
-            simulationTick: 12,
-            hostID: "host",
-            players: [
-                MultiplayerPlayerState(id: "host", position: .zero, color: .blue),
-                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
-            ],
-            zombies: [],
-            chests: [],
-            powerUps: [],
-            projectiles: [],
-            killCount: 0,
-            acknowledgedInputSequences: ["client": 100]
-        )
-        session.deliver(
-            try MultiplayerWireMessage.boardSnapshot(delayedBoard).encoded(),
-            from: "host"
-        )
-        let correctedPosition = scene.playerNode.position
-
-        // Then reconciliation is bounded instead of visibly teleporting the player.
-        let correctionDistance = hypot(
-            correctedPosition.x - predictedPosition.x,
-            correctedPosition.y - predictedPosition.y
-        )
-        #expect(predictedPosition.x > 0)
-        #expect(correctionDistance <= 9)
+        #expect(scene.isGameOver == false)
+        #expect(session.sentData.contains { data in
+            guard case let .hostAnnouncement(announcement) = try? MultiplayerWireMessage.decode(data) else {
+                return false
+            }
+            return announcement.hostID == "client"
+        })
     }
 
     @Test("Client keeps local rendering close to predicted movement during sustained input")
@@ -820,7 +383,7 @@ struct LocalMultiplayerTests {
         #expect(abs(scene.playerNode.position.x) <= 18)
     }
 
-    @Test("Client sends prediction input at a stable 30 Hz cadence")
+    @Test("Client submits prediction input once per rendered update")
     @MainActor
     func clientSendsPredictionInputAtStableCadence() throws {
         let session = FakeMultiplayerSession(localPlayerID: "client")
@@ -852,91 +415,8 @@ struct LocalMultiplayerTests {
             return input
         }
 
-        #expect(inputs.count >= 29)
-        #expect(inputs.count <= 31)
-        #expect(inputs.dropFirst().allSatisfy { input in
-            guard let previous = inputs.first(where: { $0.sequence == input.sequence - 2 }) else {
-                return false
-            }
-            return input.sequence - previous.sequence <= 2
-        })
-    }
-
-    @Test("Client interpolates remote movement without a large frame jump")
-    @MainActor
-    func clientInterpolatesRemoteMovementWithoutLargeFrameJump() throws {
-        // Given a client with two authoritative host positions separated by several ticks.
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)
-        )
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "match",
-            hostID: "host",
-            hostStartedAt: 1,
-            protocolVersion: 1
-        )).encoded())
-
-        let initialBoard = MultiplayerBoardState(
-            sequence: 1,
-            simulationTick: 0,
-            hostID: "host",
-            players: [
-                MultiplayerPlayerState(id: "host", position: .zero, color: .blue),
-                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
-            ],
-            zombies: [],
-            chests: [],
-            powerUps: [],
-            projectiles: [],
-            killCount: 0
-        )
-        session.deliver(
-            try MultiplayerWireMessage.boardSnapshot(initialBoard).encoded(),
-            from: "host"
-        )
-
-        // When the host advances a remote player over twelve simulation ticks.
-        let movedBoard = MultiplayerBoardState(
-            sequence: 2,
-            simulationTick: 12,
-            hostID: "host",
-            players: [
-                MultiplayerPlayerState(id: "host", position: CGPoint(x: 120, y: 0), color: .blue),
-                MultiplayerPlayerState(id: "client", position: .zero, color: .red)
-            ],
-            zombies: [],
-            chests: [],
-            powerUps: [],
-            projectiles: [],
-            killCount: 0
-        )
-        session.deliver(
-            try MultiplayerWireMessage.boardSnapshot(movedBoard).encoded(),
-            from: "host"
-        )
-        let remotePlayer = try #require(scene.remotePlayers["host"])
-        var previousPosition = remotePlayer.position
-
-        // Then each rendered frame advances smoothly and eventually follows the host.
-        for frame in 1...12 {
-            scene.update(Double(frame) / 60.0)
-            let currentPosition = remotePlayer.position
-            let frameDistance = hypot(
-                currentPosition.x - previousPosition.x,
-                currentPosition.y - previousPosition.y
-            )
-            #expect(frameDistance <= 20)
-            previousPosition = currentPosition
-        }
-        #expect(remotePlayer.position.x > 0)
-        #expect(remotePlayer.position.x >= 95)
+        #expect(inputs.count == 60)
+        #expect(inputs.map(\.sequence) == Array(1...60))
     }
 
     @Test("Rotation interpolation follows the shortest angular path")
@@ -1018,39 +498,6 @@ struct LocalMultiplayerTests {
         )
 
         #expect(decoded == .playerInput(input))
-    }
-
-    @Test("A multiplayer client publishes intent instead of authoritative player state")
-    @MainActor
-    func clientPublishesIntentInsteadOfPlayerState() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(
-            size: CGSize(width: 800, height: 600),
-            multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
-        )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "match", hostID: "host", hostStartedAt: 1, protocolVersion: 1
-        )).encoded())
-        let chest = try #require(scene.chests.first)
-        scene.openChest(chest)
-        scene.movementVector = CGVector(dx: 1, dy: 0)
-        scene.update(0.001)
-        scene.update(0.2)
-
-        let messages = session.sentData.compactMap { try? MultiplayerWireMessage.decode($0) }
-        let input = try #require(messages.compactMap { message -> MultiplayerPlayerInput? in
-            guard case let .playerInput(input) = message else { return nil }
-            return input
-        }.last)
-        #expect(input.wantsToOpenChestID == chest.multiplayerID)
-        #expect(!messages.contains {
-            if case .playerUpdate = $0 { return true }
-            return false
-        })
     }
 
     @Test("Reliable gameplay events round-trip every event field and use reliable delivery")
@@ -1161,104 +608,6 @@ struct LocalMultiplayerTests {
         }
     }
 
-    @Test("Snapshot buffer inserts delayed snapshots in sequence order")
-    func snapshotBufferInsertsDelayedSnapshots() {
-        var buffer = MultiplayerSnapshotBuffer(capacity: 3)
-        for sequence in [1, 3, 2] {
-            let accepted = buffer.append(MultiplayerBoardState.empty(hostID: "host", sequence: UInt64(sequence)))
-            #expect(accepted)
-        }
-
-        #expect(buffer.snapshots.map { $0.sequence } == [1, 2, 3])
-        let acceptedDuplicate = buffer.append(MultiplayerBoardState.empty(hostID: "host", sequence: 2))
-        #expect(!acceptedDuplicate)
-    }
-
-    @Test("Snapshot buffer rejects stale snapshots")
-    func snapshotBufferRejectsStaleSnapshots() {
-        var buffer = MultiplayerSnapshotBuffer()
-        let first = MultiplayerBoardState.empty(hostID: "host", sequence: 10)
-        let stale = MultiplayerBoardState.empty(hostID: "host", sequence: 9)
-
-        let acceptedFirst = buffer.append(first)
-        let acceptedStale = buffer.append(stale)
-
-        #expect(acceptedFirst)
-        #expect(!acceptedStale)
-        #expect(buffer.latest?.sequence == 10)
-    }
-
-    @Test("Snapshot interpolation lookup uses simulation ticks rather than packet sequences")
-    func snapshotBufferUsesSimulationTicksForSurroundingSnapshots() {
-        var buffer = MultiplayerSnapshotBuffer()
-        let before = MultiplayerBoardState(sequence: 100, simulationTick: 10, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        let after = MultiplayerBoardState(sequence: 200, simulationTick: 20, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        _ = buffer.append(before)
-        _ = buffer.append(after)
-
-        let surrounding = buffer.surrounding(tick: 15)
-
-        #expect(surrounding?.before == before)
-        #expect(surrounding?.after == after)
-    }
-
-    @Test("Snapshot interpolation remains correct when sequence and tick order differ")
-    func snapshotBufferOrdersInterpolationBySimulationTick() {
-        var buffer = MultiplayerSnapshotBuffer(capacity: 4)
-        let lateTick = MultiplayerBoardState(sequence: 1, simulationTick: 20, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        let earlyTick = MultiplayerBoardState(sequence: 2, simulationTick: 10, hostID: "host", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        let acceptedLateTick = buffer.append(lateTick)
-        let acceptedEarlyTick = buffer.append(earlyTick)
-        #expect(acceptedLateTick)
-        #expect(acceptedEarlyTick)
-
-        let surrounding = buffer.surrounding(tick: 15)
-
-        #expect(surrounding?.before == earlyTick)
-        #expect(surrounding?.after == lateTick)
-    }
-
-    @Test("Snapshot buffer samples with an explicit delay and bounded extrapolation")
-    func snapshotBufferSamplesDelayedAndBounded() {
-        var buffer = MultiplayerSnapshotBuffer(capacity: 4)
-        let first = MultiplayerBoardState(sequence: 1, simulationTick: 10, hostID: "host", players: [
-            MultiplayerPlayerState(id: "player", position: CGPoint(x: 0, y: 0), color: .blue)
-        ], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        let second = MultiplayerBoardState(sequence: 2, simulationTick: 20, hostID: "host", players: [
-            MultiplayerPlayerState(id: "player", position: CGPoint(x: 100, y: 0), color: .blue)
-        ], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 0)
-        _ = buffer.append(first)
-        _ = buffer.append(second)
-
-        #expect(buffer.position(for: "player", renderTick: 25, delayTicks: 5, maxExtrapolationTicks: 3) == CGPoint(x: 100, y: 0))
-        #expect(buffer.position(for: "player", renderTick: 20, delayTicks: 5, maxExtrapolationTicks: 3) == CGPoint(x: 50, y: 0))
-    }
-
-    @Test("Client ignores snapshots from a different host")
-    @MainActor
-    func clientIgnoresSnapshotsFromDifferentHost() async throws {
-        let session = FakeMultiplayerSession(localPlayerID: "client")
-        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
-            sessionID: "wasteland-survivors-local",
-            hostID: "host-a",
-            hostStartedAt: 1,
-            protocolVersion: 1
-        )).encoded())
-
-        let first = MultiplayerBoardState.empty(hostID: "host-a", sequence: 1)
-        let second = MultiplayerBoardState(sequence: 2, hostID: "host-b", players: [], zombies: [], chests: [], powerUps: [], projectiles: [], killCount: 99)
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(first).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-        session.deliver(try MultiplayerWireMessage.boardSnapshot(second).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-
-        #expect(scene.killCount == 0)
-    }
-
     @Test("Every networked gameplay entity receives a unique stable ID")
     func gameplayEntitiesHaveStableIDs() {
         let zombie = ZombieNode()
@@ -1269,41 +618,6 @@ struct LocalMultiplayerTests {
         let ids = [zombie.multiplayerID, chest.multiplayerID, powerUp.multiplayerID, projectile.multiplayerID]
         #expect(ids.allSatisfy { !$0.isEmpty })
         #expect(Set(ids).count == ids.count)
-    }
-
-    @Test("An entity keeps its ID when it is serialized into a snapshot")
-    func snapshotUsesEntityIDs() {
-        let zombie = ZombieNode()
-        let chest = ChestNode()
-        let powerUp = PowerUpNode(powerUp: .range)
-        let projectile = ProjectileNode(weapon: .rifle, directionAngle: 0.2)
-
-        #expect(MultiplayerSnapshotEntityIDs.zombie(zombie) == zombie.multiplayerID)
-        #expect(MultiplayerSnapshotEntityIDs.chest(chest) == chest.multiplayerID)
-        #expect(MultiplayerSnapshotEntityIDs.powerUp(powerUp) == powerUp.multiplayerID)
-        #expect(MultiplayerSnapshotEntityIDs.projectile(projectile) == projectile.multiplayerID)
-    }
-
-    @Test("Host does not reflect legacy client player updates")
-    @MainActor
-    func hostDoesNotReflectClientPlayerUpdates() async throws {
-        let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600), multiplayerSessionID: "wasteland-survivors-local", multiplayerSessionFactory: { session })
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-
-        let first = MultiplayerPlayerState(id: "client", position: CGPoint(x: 10, y: 0), color: .red, sessionStartedAt: 10)
-        session.deliver(try MultiplayerWireMessage.playerUpdate(first).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-        scene.update(1)
-
-        let second = MultiplayerPlayerState(id: "client", position: CGPoint(x: 100, y: 0), color: .red, sessionStartedAt: 10)
-        session.deliver(try MultiplayerWireMessage.playerUpdate(second).encoded())
-        try await Task.sleep(for: .milliseconds(50))
-        scene.update(1.016)
-
-        #expect(scene.remotePlayers["client"] == nil)
     }
 
     @Test("MultipeerConnectivity uses the transport identity in peer callbacks")
@@ -1322,45 +636,5 @@ struct LocalMultiplayerTests {
 
         #expect(session.state == .connecting)
         #expect(session.connectedPeerIDs.isEmpty)
-    }
-
-    @Test("Compact snapshots contain only correction state and target overrides")
-    func compactSnapshotsExcludePredictableWorldEntities() throws {
-        let snapshot = MultiplayerCompactSnapshot(
-            sequence: 1,
-            simulationTick: 30,
-            seed: 42,
-            hostID: "host",
-            players: [
-                MultiplayerCompactPlayerState(
-                    id: "player",
-                    x: 10,
-                    y: 20,
-                    rotation: 1.5,
-                    health: 100,
-                    attackTargetID: "zombie-1"
-                )
-            ],
-            zombieTargetOverrides: [
-                MultiplayerZombieTargetOverride(
-                    zombieID: "zombie-1",
-                    targetPlayerID: "player",
-                    effectiveTick: 30
-                )
-            ],
-            acknowledgedInputSequences: ["player": 29]
-        )
-
-        let data = try MultiplayerWireMessage.compactSnapshot(snapshot).encoded()
-        let payload = try #require(String(data: data, encoding: .utf8))
-        let decoded = try MultiplayerWireMessage.decode(data)
-
-        #expect(decoded == .compactSnapshot(snapshot))
-        #expect(!payload.contains("zombies"))
-        #expect(!payload.contains("chests"))
-        #expect(!payload.contains("powerUps"))
-        #expect(!payload.contains("projectiles"))
-        #expect(payload.contains("attackTargetID"))
-        #expect(payload.contains("zombieTargetOverrides"))
     }
 }

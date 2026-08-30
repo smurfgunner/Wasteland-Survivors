@@ -348,13 +348,13 @@ struct MultiplayerCombatBehaviorTests {
         #expect(step.state.projectiles.allSatisfy { $0.ownerID == "player" && $0.damage > 0 })
     }
 
-    @Test("A client-side zombie death can be corrected by a later authoritative health snapshot")
-    func aClientSideZombieDeathCanBeCorrectedByALaterAuthoritativeHealthSnapshot() {
+    @Test("Recovery can restore a zombie that is present in the authoritative state")
+    func recoveryCanRestoreAZombiePresentInAuthoritativeState() {
         // Given a client node that was prematurely marked dead by a local visual collision.
         let zombie = ZombieNode(multiplayerID: "zombie")
         zombie.apply(multiplayerHealth: 0)
 
-        // When a later authoritative snapshot reports that the zombie is still alive.
+        // When recovery reports that the zombie is still alive.
         zombie.apply(multiplayerHealth: 30)
 
         // Then the client restores the authoritative living state.
@@ -362,35 +362,9 @@ struct MultiplayerCombatBehaviorTests {
         #expect(zombie.health == 30)
     }
 
-    @Test("Authoritative player health survives a board snapshot round trip")
-    func authoritativePlayerHealthSurvivesABoardSnapshotRoundTrip() {
-        // Given a multiplayer state containing distinct player health values.
-        let state = makeState(
-            players: [
-                makePlayer(id: "host", position: .zero, health: 64),
-                makePlayer(id: "client", position: CGPointValue(x: 100, y: 100), health: 28)
-            ]
-        )
-
-        // When the state is mapped to a board and back.
-        let board = GameStateMultiplayerMapper.boardState(
-            from: state,
-            sequence: 4,
-            timestamp: 10,
-            hostID: "host",
-            playerColors: [:],
-            sessionStartTimes: [:]
-        )
-        let roundTripped = GameStateMultiplayerMapper.gameState(from: board, seed: 1)
-
-        // Then both health values and the game-over state are preserved.
-        #expect(roundTripped.players.map(\.health) == [28, 64])
-        #expect(roundTripped.isGameOver == state.isGameOver)
-    }
-
-    @Test("Client prediction replays pending movement without changing authoritative health")
+    @Test("Client prediction replays pending movement without changing recovered health")
     func clientPredictionReplaysPendingMovementWithoutChangingAuthoritativeHealth() {
-        // Given an authoritative snapshot with a damaged local player and a pending movement input.
+        // Given recovered authoritative state with a damaged local player and a pending movement input.
         let authoritative = makeState(
             players: [makePlayer(id: "client", position: .zero, health: 40)],
             zombies: [makeZombie(id: "zombie", position: CGPointValue(x: 200, y: 0))]
@@ -401,33 +375,9 @@ struct MultiplayerCombatBehaviorTests {
         var driver = FixedTickSimulationDriver(initialState: authoritative)
         let steps = driver.advance(elapsedTime: 1.0 / 60.0, inputs: [pending])
 
-        // Then prediction preserves the snapshot health while applying movement.
+        // Then prediction preserves the recovered health while applying movement.
         #expect(steps.last?.state.players[0].health == 40)
         #expect(steps.last?.state.players[0].position == CGPointValue(x: 3, y: 0))
-    }
-
-    @Test("An authoritative game-over snapshot is represented as game over on the client")
-    func anAuthoritativeGameOverSnapshotIsRepresentedAsGameOverOnTheClient() {
-        // Given a host snapshot marked game over.
-        let state = makeState(
-            players: [makePlayer(id: "player", position: .zero, health: 0)],
-            isGameOver: true
-        )
-        let board = GameStateMultiplayerMapper.boardState(
-            from: state,
-            sequence: 8,
-            timestamp: 20,
-            hostID: "host",
-            playerColors: [:],
-            sessionStartTimes: [:]
-        )
-
-        // When the client decodes it.
-        let decoded = GameStateMultiplayerMapper.gameState(from: board, seed: 1)
-
-        // Then the terminal state is retained.
-        #expect(decoded.isGameOver)
-        #expect(decoded.players[0].health == 0)
     }
 
     private func makeState(
@@ -435,17 +385,7 @@ struct MultiplayerCombatBehaviorTests {
         zombies: [GameZombieState] = [],
         isGameOver: Bool = false
     ) -> GameState {
-        GameState(
-            seed: 42,
-            tick: 0,
-            players: players,
-            zombies: zombies,
-            chests: [],
-            powerUps: [],
-            projectiles: [],
-            score: 0,
-            isGameOver: isGameOver
-        )
+        GameState(seed: 42, tick: 0, players: players, zombies: zombies, chests: [], powerUps: [], projectiles: [], score: 0, isGameOver: isGameOver)
     }
 
     private func makePlayer(
@@ -454,14 +394,7 @@ struct MultiplayerCombatBehaviorTests {
         health: Double = 100,
         weapon: WeaponType = .pistol
     ) -> GamePlayerState {
-        GamePlayerState(
-            id: id,
-            position: position,
-            rotation: 0,
-            health: health,
-            weapon: weapon,
-            powerUps: []
-        )
+        GamePlayerState(id: id, position: position, rotation: 0, health: health, weapon: weapon, powerUps: [])
     }
 
     private func makeZombie(
@@ -469,12 +402,7 @@ struct MultiplayerCombatBehaviorTests {
         position: CGPointValue,
         health: Double = 60
     ) -> GameZombieState {
-        GameZombieState(
-            id: id,
-            position: position,
-            rotation: 0,
-            health: health
-        )
+        GameZombieState(id: id, position: position, rotation: 0, health: health)
     }
 
     private func input(
@@ -483,12 +411,7 @@ struct MultiplayerCombatBehaviorTests {
         sequence: UInt64,
         wantsToAttack: Bool = false
     ) -> PlayerInput {
-        PlayerInput(
-            playerID: playerID,
-            sequence: sequence,
-            movement: movement,
-            aimAngle: 0,
-            wantsToAttack: wantsToAttack
-        )
+        PlayerInput(playerID: playerID, sequence: sequence, movement: movement, aimAngle: 0, wantsToAttack: wantsToAttack)
     }
+
 }
