@@ -215,6 +215,7 @@ struct EventReplicationSystem {
     var lastAppliedSequence: UInt64 = 0
     private(set) var currentScore = 0
     private(set) var recoveryRequestedFromSequence: UInt64?
+    private var lastAppliedSequencesBySender: [String: UInt64] = [:]
     private var pendingEvents: [MultiplayerEventEnvelope] = []
     var pendingEventCount: Int { pendingEvents.count }
     var eventHistoryRequiredForInitialization: Bool { false }
@@ -226,7 +227,7 @@ struct EventReplicationSystem {
     private var activePowerUps: Set<String> = ["power-up-1"]
     private var targets: [String: String?] = [:]
     private var outgoing: [MultiplayerEventEnvelope] = []
-    private var appliedEvents: [UInt64: MultiplayerEventEnvelope] = [:]
+    private var appliedEvents: [String: MultiplayerEventEnvelope] = [:]
     private var outgoingRecipientsStorage: [String] = ["host", "client-2"]
     private var disconnected: Set<String> = []
     private var hasAppliedEmptyRecovery = false
@@ -237,7 +238,7 @@ struct EventReplicationSystem {
         players[localPlayerID] = (.zero, 0, .pistol, 100, false)
     }
 
-    mutating func receive(_ payload: MultiplayerInitializationPayload, from senderID: String? = nil) -> EventReplicationResult { guard payload.sessionID == sessionID else { return .rejectedWith(.wrongSession) }; guard senderID == nil || senderID == payload.hostID else { return .rejectedWith(.unauthorizedSender) }; guard payload.protocolVersion == 1 else { return .rejectedWith(.unsupportedVersion) }; guard Set(payload.players.map(\.id)).count == payload.players.count, Set(payload.zombies.map(\.id)).count == payload.zombies.count else { return .rejectedWith(.malformedPayload) }; guard payload.zombies.allSatisfy({ $0.health >= 0 && $0.health.isFinite }) else { return .rejectedWith(.malformedPayload) }; if isInitialized { return .duplicate }; isInitialized = true; seed = payload.seed; simulationTick = payload.simulationTick; lastAppliedSequence = payload.sequence; players = Dictionary(uniqueKeysWithValues: payload.players.map { ($0.id, ($0.spawnPosition, 0, .pistol, 100, false)) }); zombies = Dictionary(uniqueKeysWithValues: payload.zombies.map { ($0.id, ($0.health, false)) }); let world = LocalWorldGenerator(seed: seed).world(at: simulationTick); activeChests = Set(world.chests); activePowerUps = Set(world.powerUps); for pending in pendingEvents.sorted(by: { $0.sequence < $1.sequence }) { _ = receive(pending) }; pendingEvents.removeAll(); return .accepted }
+    mutating func receive(_ payload: MultiplayerInitializationPayload, from senderID: String? = nil) -> EventReplicationResult { guard payload.sessionID == sessionID else { return .rejectedWith(.wrongSession) }; guard senderID == nil || senderID == payload.hostID else { return .rejectedWith(.unauthorizedSender) }; guard payload.protocolVersion == 1 else { return .rejectedWith(.unsupportedVersion) }; guard Set(payload.players.map(\.id)).count == payload.players.count, Set(payload.zombies.map(\.id)).count == payload.zombies.count else { return .rejectedWith(.malformedPayload) }; guard payload.zombies.allSatisfy({ $0.health >= 0 && $0.health.isFinite }) else { return .rejectedWith(.malformedPayload) }; if isInitialized { return .duplicate }; isInitialized = true; seed = payload.seed; simulationTick = payload.simulationTick; lastAppliedSequence = payload.sequence; lastAppliedSequencesBySender[payload.hostID] = payload.sequence; players = Dictionary(uniqueKeysWithValues: payload.players.map { ($0.id, ($0.spawnPosition, 0, .pistol, 100, false)) }); zombies = Dictionary(uniqueKeysWithValues: payload.zombies.map { ($0.id, ($0.health, false)) }); let world = LocalWorldGenerator(seed: seed).world(at: simulationTick); activeChests = Set(world.chests); activePowerUps = Set(world.powerUps); for pending in pendingEvents.sorted(by: { $0.sequence < $1.sequence }) { _ = receive(pending) }; pendingEvents.removeAll(); return .accepted }
 
     mutating func receive(_ envelope: MultiplayerEventEnvelope) -> EventReplicationResult {
         guard isInitialized else {
@@ -249,23 +250,26 @@ struct EventReplicationSystem {
         guard envelope.sequence > 0 else { return .rejectedWith(.invalidSequence) }
         guard envelope.simulationTick > 0 else { return .rejectedWith(.inconsistentTick) }
         guard !disconnected.contains(envelope.senderID) else { return .rejectedWith(.senderDisconnected) }
-        if envelope.sequence <= lastAppliedSequence {
-            return appliedEvents[envelope.sequence] == envelope ? .duplicate : .stale
+        let senderSequence = lastAppliedSequencesBySender[envelope.senderID] ?? lastAppliedSequence
+        let eventKey = "\(envelope.senderID):\(envelope.sequence)"
+        if envelope.sequence <= senderSequence {
+            return appliedEvents[eventKey] == envelope ? .duplicate : .stale
         }
 
         let isReplaceableMovement = envelope.delivery == .replaceable && envelope.payload.isMovementEvent
-        guard isReplaceableMovement || envelope.sequence == lastAppliedSequence + 1 else {
-            recoveryRequestedFromSequence = lastAppliedSequence + 1
-            return .gapDetected(expected: lastAppliedSequence + 1, received: envelope.sequence)
+        guard isReplaceableMovement || envelope.sequence == senderSequence + 1 else {
+            recoveryRequestedFromSequence = senderSequence + 1
+            return .gapDetected(expected: senderSequence + 1, received: envelope.sequence)
         }
         guard apply(envelope.payload) else { return .rejectedWith(.unknownEntity) }
-        appliedEvents[envelope.sequence] = envelope
+        appliedEvents[eventKey] = envelope
+        lastAppliedSequencesBySender[envelope.senderID] = envelope.sequence
         lastAppliedSequence = max(lastAppliedSequence, envelope.sequence)
         simulationTick = max(simulationTick, envelope.simulationTick)
         return .accepted
     }
 
-    mutating func emit(_ event: MultiplayerSyncEvent) { guard isInitialized else { return }; let sender = localPlayerID; let delivery = event.isMovementEvent ? configuration.movementDelivery : .reliable; let next = MultiplayerEventEnvelope(sessionID: sessionID, sequence: lastAppliedSequence + UInt64(outgoing.count) + 1, simulationTick: max(1, simulationTick), senderID: sender, payload: event, delivery: delivery); outgoing.append(next); _ = apply(event) }
+    mutating func emit(_ event: MultiplayerSyncEvent) { guard isInitialized else { return }; let sender = localPlayerID; let delivery = event.isMovementEvent ? configuration.movementDelivery : .reliable; let nextSequence = (lastAppliedSequencesBySender[sender] ?? lastAppliedSequence) + UInt64(outgoing.count) + 1; let next = MultiplayerEventEnvelope(sessionID: sessionID, sequence: nextSequence, simulationTick: max(1, simulationTick), senderID: sender, payload: event, delivery: delivery); outgoing.append(next); _ = apply(event) }
     mutating func setSimulationTick(_ tick: UInt64) { simulationTick = tick }
     mutating func setPlayerTransform(playerID: String, position: CGPointValue, facing: Double) -> EventReplicationResult { guard let p = players[playerID], !p.dead else { return .rejectedWith(.unknownEntity) }; guard p.position != position || p.facing != facing else { return .accepted }; emit(.playerTransformChanged(playerID: playerID, position: position, facing: facing)); return .accepted }
     mutating func setWeapon(playerID: String, weapon: WeaponType) -> EventReplicationResult { guard let p = players[playerID], !p.dead else { return .rejectedWith(.unknownEntity) }; guard p.weapon != weapon else { return .accepted }; emit(.weaponChanged(playerID: playerID, weapon: weapon)); return .accepted }

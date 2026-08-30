@@ -412,11 +412,9 @@ final class GameScene: SKScene {
         
         guard menuState == .playing, !isGameOver else { return }
         
-        // 1. Player Movement & Camera
-        if shouldAdvanceAuthoritativeMultiplayerSimulation, authoritativeGameState != nil {
-            advanceAuthoritativePlayerMovement(dt: dt)
-        } else if isMultiplayerClient {
-            advanceClientPrediction(dt: dt)
+        // 1. Every multiplayer peer advances the same local simulation.
+        if multiplayerTransport != nil {
+            advanceMultiplayerSimulation(dt: dt)
         } else {
             advanceOfflineSimulation(dt: dt)
         }
@@ -665,26 +663,40 @@ final class GameScene: SKScene {
         return direction
     }
 
-    private func advanceAuthoritativePlayerMovement(dt: TimeInterval) {
-        guard var driver = authoritativeSimulationDriver,
-              let session = multiplayerTransport,
+    private func advanceMultiplayerSimulation(dt: TimeInterval) {
+        guard let session = multiplayerTransport else { return }
+        let availableDriver = isMultiplayerClient ? clientPredictionDriver : authoritativeSimulationDriver
+        guard var driver = availableDriver,
               driver.state.players.contains(where: { $0.id == session.localPeerID }) else {
             return
         }
 
-        var inputs = [PlayerInput(
+        localInputSequence &+= 1
+        let localInput = PlayerInput(
             playerID: session.localPeerID,
-            sequence: driver.state.tick &+ 1,
+            sequence: localInputSequence,
             movement: CGPointValue(currentMovementDirection()),
             aimAngle: currentAimAngle(),
-            wantsToAttack: true
-        )]
-        if let multiplayerCoordinator {
-            inputs.append(contentsOf: multiplayerCoordinator.consumePlayerInputs())
-        }
+            wantsToAttack: true,
+            attackTargetID: synchronizedPlayerTargets[session.localPeerID] ?? nil,
+            wantsToOpenChestID: pendingChestInteractionID,
+            wantsToCollectPowerUpID: pendingPowerUpInteractionID
+        )
+        pendingChestInteractionID = nil
+        pendingPowerUpInteractionID = nil
+        latestLocalPlayerInput = localInput
+        multiplayerCoordinator?.submitPlayerInput(localInput)
+
+        var inputs = multiplayerCoordinator?.consumePlayerInputs() ?? []
+        inputs.append(localInput)
+        inputs.sort { $0.playerID < $1.playerID }
 
         let steps = driver.advance(elapsedTime: dt, inputs: inputs)
-        authoritativeSimulationDriver = driver
+        if isMultiplayerClient {
+            clientPredictionDriver = driver
+        } else {
+            authoritativeSimulationDriver = driver
+        }
         var latestRenderedState: GameState?
         for step in steps {
             var renderedState = step.state
@@ -714,7 +726,11 @@ final class GameScene: SKScene {
         }
         guard let state = latestRenderedState else { return }
         driver.replaceState(state)
-        authoritativeSimulationDriver = driver
+        if isMultiplayerClient {
+            clientPredictionDriver = driver
+        } else {
+            authoritativeSimulationDriver = driver
+        }
         authoritativeGameState = state
     }
 
@@ -1201,6 +1217,10 @@ extension GameScene {
         )
         authoritativeGameState = initialState
         clientPredictionDriver = FixedTickSimulationDriver(initialState: initialState)
+        // The snapshot already contains elapsed simulation time. Do not replay the
+        // interval between scene creation and initialization on top of that state.
+        hasReceivedFirstUpdate = false
+        lastUpdateTime = 0
     }
 
     private func makeMultiplayerRecoveryPayload(firstSequence: UInt64) -> MultiplayerRecoveryPayload? {

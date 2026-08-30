@@ -63,6 +63,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     private var appliedEvents = AppliedEventStore()
     private var nextGameplayEventSequence: UInt64 = 0
     private var lastReceivedEventSequence: UInt64 = 0
+    private var lastReceivedEventSequencesBySender: [String: UInt64] = [:]
     private var lastPublishedTransforms: [String: (CGPointValue, Double)] = [:]
     private var lastPublishedPlayerTargets: [String: String] = [:]
     private var lastPublishedZombieTargets: [String: String] = [:]
@@ -139,6 +140,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         appliedEvents = AppliedEventStore()
         eventReplicationSystem = nil
         lastReceivedEventSequence = 0
+        lastReceivedEventSequencesBySender.removeAll()
     }
 
     func consumeQueuedInputs() -> [MultiplayerPlayerInput] {
@@ -185,8 +187,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     }
 
     func submitPlayerInput(_ input: PlayerInput) {
-        guard role == .client, input.playerID == transport.localPeerID,
-              let hostID else { return }
+        guard (role == .host || role == .client),
+              input.playerID == transport.localPeerID else { return }
         send(.playerInput(MultiplayerPlayerInput(
             playerID: input.playerID,
             sequence: input.sequence,
@@ -196,7 +198,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
             attackTargetID: input.attackTargetID,
             wantsToOpenChestID: input.wantsToOpenChestID,
             wantsToCollectPowerUpID: input.wantsToCollectPowerUpID
-        )), to: hostID)
+        )))
     }
 
     func publishSimulationStep(_ step: SimulationStep) {
@@ -313,6 +315,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
             queuedInputs.removeAll()
             latestInputs.removeAll()
             appliedEvents = AppliedEventStore()
+            lastReceivedEventSequencesBySender.removeAll()
         }
     }
 
@@ -432,16 +435,18 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
             guard system.receive(payload, from: peerID) == .accepted else { return false }
             eventReplicationSystem = system
             lastReceivedEventSequence = payload.sequence
+            lastReceivedEventSequencesBySender[payload.hostID] = payload.sequence
             nextGameplayEventSequence = max(nextGameplayEventSequence, payload.sequence)
             onInitialization?(payload)
             return true
         case let .event(event):
-            if case let .event(event) = message {
-                guard event.sequence > lastReceivedEventSequence else { return false }
+            do {
+                let senderSequence = lastReceivedEventSequencesBySender[event.senderID] ?? 0
+                guard event.sequence > senderSequence else { return false }
                 let isReplaceableMovement = event.delivery == .replaceable && event.payload.isMovementEvent
-                guard isReplaceableMovement || event.sequence == lastReceivedEventSequence + 1 else {
-                    onRecoveryRequested?(lastReceivedEventSequence + 1)
-                    if let recovery = recoveryProvider?(lastReceivedEventSequence + 1) {
+                guard isReplaceableMovement || event.sequence == senderSequence + 1 else {
+                    onRecoveryRequested?(senderSequence + 1)
+                    if let recovery = recoveryProvider?(senderSequence + 1) {
                         send(.recovery(recovery), to: peerID ?? transport.localPeerID)
                     }
                     return false
@@ -457,6 +462,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
                         eventReplicationSystem = system
                     }
                 }
+                lastReceivedEventSequencesBySender[event.senderID] = event.sequence
                 lastReceivedEventSequence = max(lastReceivedEventSequence, event.sequence)
                 nextGameplayEventSequence = max(nextGameplayEventSequence, event.sequence)
                 onEvent?(event)
@@ -540,9 +546,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
     }
 
     private func handle(_ input: MultiplayerPlayerInput) {
-        guard role == .host,
+        guard (role == .host || role == .client),
               input.playerID != transport.localPeerID,
-              acceptedPeerIDs.contains(input.playerID),
               transport.connectedPeerIDs.contains(input.playerID),
               isValid(input),
               latestInputSequences[input.playerID].map({ isNewer(input.sequence, than: $0) }) ?? true else { return }

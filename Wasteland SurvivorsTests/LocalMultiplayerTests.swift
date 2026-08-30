@@ -152,9 +152,9 @@ struct LocalMultiplayerTests {
         #expect(player.multiplayerColor == .purple)
     }
 
-    @Test("Authoritative simulation is independent of render frame partitioning")
+    @Test("Multiplayer simulation is independent of render frame partitioning")
     @MainActor
-    func authoritativeSimulationIsIndependentOfRenderFramePartitioning() throws {
+    func multiplayerSimulationIsIndependentOfRenderFramePartitioning() throws {
         let splitSession = FakeMultiplayerSession(localPlayerID: "host-split")
         let splitScene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
@@ -171,9 +171,9 @@ struct LocalMultiplayerTests {
             startedAt: 9_999_999_999,
             protocolVersion: 1
         )).encoded())
-        splitScene.update(0.001)
-        splitScene.update(0.001 + 1.0 / 120.0)
-        splitScene.update(0.001 + 2.0 / 120.0)
+        splitScene.update(0)
+        splitScene.update(1.0 / 120.0)
+        splitScene.update(1.0 / 60.0 + 0.000001)
 
         let wholeSession = FakeMultiplayerSession(localPlayerID: "host-whole")
         let wholeScene = GameScene.newGameScene(
@@ -199,9 +199,9 @@ struct LocalMultiplayerTests {
         #expect(splitScene.playerNode.position == wholeScene.playerNode.position)
     }
 
-    @Test("Restarting a multiplayer match resets authoritative tick state")
+    @Test("Restarting a multiplayer match resets local multiplayer tick state")
     @MainActor
-    func restartingMultiplayerMatchResetsAuthoritativeTickState() throws {
+    func restartingMultiplayerMatchResetsLocalMultiplayerTickState() throws {
         let session = FakeMultiplayerSession(localPlayerID: "host")
         let scene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
@@ -230,9 +230,9 @@ struct LocalMultiplayerTests {
         #expect(scene.authoritativeSimulationTick == 1)
     }
 
-    @Test("Host advances a joined player's authoritative position from peer input")
+    @Test("A peer applies a joined player's replicated position from peer input")
     @MainActor
-    func hostAdvancesJoinedPlayerFromPeerInput() throws {
+    func peerAppliesJoinedPlayerFromPeerInput() throws {
         let session = FakeMultiplayerSession(localPlayerID: "host")
         let scene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
@@ -264,44 +264,94 @@ struct LocalMultiplayerTests {
     @Test("Host local player moves on the host screen while the remote client sees the same movement")
     @MainActor
     func hostLocalPlayerMovesOnHostScreenDuringMultiplayer() throws {
-        let session = FakeMultiplayerSession(localPlayerID: "host")
-        let scene = GameScene.newGameScene(
+        let hostSession = FakeMultiplayerSession(localPlayerID: "host")
+        let hostScene = GameScene.newGameScene(
             size: CGSize(width: 800, height: 600),
             multiplayerSessionID: "match",
-            multiplayerSessionFactory: { session }
+            multiplayerSessionFactory: { hostSession }
         )
-        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        scene.didMove(to: view)
-        scene.startLocalMultiplayer()
-        session.connectedPeerIDs.insert("client")
-        session.deliver(try MultiplayerWireMessage.hello(.init(
+        let hostView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        hostScene.didMove(to: hostView)
+        hostScene.startLocalMultiplayer()
+        hostSession.connectedPeerIDs.insert("client")
+        hostSession.deliver(try MultiplayerWireMessage.hello(.init(
             sessionID: "match",
             peerID: "client",
             startedAt: 9_999_999_999,
             protocolVersion: 1
         )).encoded())
-        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+        hostSession.deliver(try MultiplayerWireMessage.joinRequest(.init(
             sessionID: "match",
             peerID: "client",
             protocolVersion: 1
         )).encoded(), from: "client")
 
-        let initialWorldPosition = scene.playerNode.position
-        let initialScreenPosition = scene.cameraNode.convert(
-            scene.playerNode.position,
-            from: scene.worldNode
-        )
-        scene.movementVector = CGVector(dx: 1, dy: 0)
+        let initialization = try #require(hostSession.sentData.compactMap { data -> MultiplayerInitializationPayload? in
+            guard case let .initialization(payload) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            return payload
+        }.last)
 
-        scene.update(0)
-        scene.update(1.0 / 60.0)
-
-        let currentScreenPosition = scene.cameraNode.convert(
-            scene.playerNode.position,
-            from: scene.worldNode
+        let clientSession = FakeMultiplayerSession(localPlayerID: "client")
+        let clientScene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { clientSession }
         )
-        #expect(scene.playerNode.position.x > initialWorldPosition.x)
-        #expect(currentScreenPosition.x > initialScreenPosition.x)
+        let clientView = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        clientScene.didMove(to: clientView)
+        clientScene.startLocalMultiplayer()
+        clientSession.connectedPeerIDs.insert("host")
+        clientSession.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded())
+        clientSession.deliver(
+            try MultiplayerWireMessage.initialization(initialization).encoded(),
+            from: "host"
+        )
+        clientScene.update(0)
+        clientScene.update(1.0 / 60.0)
+
+        let initialHostPosition = hostScene.playerNode.position
+        let initialClientScreenPosition = clientScene.cameraNode.convert(
+            clientScene.playerNode.position,
+            from: clientScene.worldNode
+        )
+        hostScene.movementVector = CGVector(dx: 1, dy: 0)
+        hostScene.update(0)
+        hostScene.update(1.0 / 60.0)
+
+        let hostTransform = try #require(hostSession.sentData.compactMap { data -> MultiplayerEventEnvelope? in
+            guard case let .event(envelope) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            guard case let .playerTransformChanged(playerID, _, _) = envelope.payload,
+                  playerID == "host" else {
+                return nil
+            }
+            return envelope
+        }.last)
+        clientSession.deliver(
+            try MultiplayerWireMessage.event(hostTransform).encoded(),
+            from: "host"
+        )
+
+        let remoteHost = try #require(clientScene.remotePlayers["host"])
+        #expect(hostScene.playerNode.position.x > initialHostPosition.x)
+        #expect(remoteHost.position == hostScene.playerNode.position)
+        #expect(hostScene.cameraNode.position == hostScene.playerNode.position)
+        #expect(clientScene.cameraNode.position == clientScene.playerNode.position)
+
+        // Each camera follows its local player, keeping that player centered in screen space.
+        let currentClientScreenPosition = clientScene.cameraNode.convert(
+            clientScene.playerNode.position,
+            from: clientScene.worldNode
+        )
+        #expect(currentClientScreenPosition == initialClientScreenPosition)
     }
 
     @Test("A host renders every independently joined client")

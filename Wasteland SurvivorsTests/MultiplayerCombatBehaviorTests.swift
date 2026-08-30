@@ -4,8 +4,8 @@ import Testing
 
 @Suite("Multiplayer Combat Behavior")
 struct MultiplayerCombatBehaviorTests {
-    @Test("Two players move independently through the authoritative simulation")
-    func twoPlayersMoveIndependentlyThroughAuthoritativeSimulation() {
+    @Test("Two players move independently through the deterministic local simulation")
+    func twoPlayersMoveIndependentlyThroughDeterministicLocalSimulation() {
         // Given two players with independent movement inputs.
         let state = makeState(
             players: [

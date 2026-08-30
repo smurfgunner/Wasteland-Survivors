@@ -221,9 +221,9 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(session.deliveryPolicies.last == .reliable)
     }
 
-    @Test("A client cannot broadcast authoritative gameplay events")
+    @Test("A client broadcasts its own gameplay events to peers")
     @MainActor
-    func clientCannotBroadcastGameplayEvents() throws {
+    func clientBroadcastsOwnedGameplayEvents() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
         let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
         coordinator.start()
@@ -231,17 +231,18 @@ struct MultiplayerSessionCoordinatorTests {
             sessionID: "match", peerID: "host", startedAt: 1, protocolVersion: 1
         )).encoded())
 
-        coordinator.broadcastGameplayEvent(.matchEnded, sequence: 1, tick: 10)
+        session.connectedPeerIDs = ["host"]
+        coordinator.publishGameplayEvents([.matchEnded], tick: 10)
 
-        #expect(session.messages.filter {
-            if case .gameplayEvent = $0 { return true }
+        #expect(session.messages.contains {
+            if case .event = $0 { return true }
             return false
-        }.isEmpty)
+        })
     }
 
-    @Test("A client sends owned intent to the elected host")
+    @Test("A client broadcasts owned intent to every peer")
     @MainActor
-    func clientSendsOwnedIntentToHost() throws {
+    func clientBroadcastsOwnedIntentToEveryPeer() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
         let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
         coordinator.start()
@@ -253,7 +254,14 @@ struct MultiplayerSessionCoordinatorTests {
             playerID: "client", sequence: 1, movement: CGVector(dx: 1, dy: 0),
             aimAngle: 0.5, wantsToAttack: true
         )
-        coordinator.sendPlayerInput(input)
+        let directedCountBeforeInput = session.directedPeerIDs.count
+        coordinator.submitPlayerInput(PlayerInput(
+            playerID: input.playerID,
+            sequence: input.sequence,
+            movement: CGPointValue(input.movement),
+            aimAngle: input.aimAngle,
+            wantsToAttack: input.wantsToAttack
+        ))
 
         let message = try #require(session.messages.last)
         guard case let .playerInput(sentInput) = message else {
@@ -261,7 +269,7 @@ struct MultiplayerSessionCoordinatorTests {
             return
         }
         #expect(sentInput == input)
-        #expect(session.directedPeerIDs.last == "host")
+        #expect(session.directedPeerIDs.count == directedCountBeforeInput)
         #expect(session.deliveryPolicies.last == .replaceable)
     }
 
@@ -454,9 +462,9 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.consumeQueuedInputs() == [first])
     }
 
-    @Test("A client does not queue input for authoritative simulation")
+    @Test("A client queues remote input for its local simulation")
     @MainActor
-    func clientDoesNotQueueInputForAuthoritativeSimulation() throws {
+    func clientQueuesRemoteInputForLocalSimulation() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
         let coordinator = MultiplayerSessionCoordinator(
             transport: session,
@@ -471,6 +479,7 @@ struct MultiplayerSessionCoordinatorTests {
             protocolVersion: 1
         ))
         session.deliver(try hostHello.encoded())
+        session.connectedPeerIDs.insert("other-client")
 
         let input = MultiplayerPlayerInput(
             playerID: "other-client",
@@ -482,13 +491,13 @@ struct MultiplayerSessionCoordinatorTests {
         session.deliver(try MultiplayerWireMessage.playerInput(input).encoded())
 
         #expect(coordinator.role == .client)
-        #expect(coordinator.consumeQueuedInputs().isEmpty)
+        #expect(coordinator.consumeQueuedInputs() == [input])
     }
 }
 
-    @Test("A connected but unaccepted peer cannot influence the host")
+    @Test("A connected peer can contribute input without host authority")
     @MainActor
-    func unacceptedPeerInputIsIgnored() throws {
+    func connectedPeerInputIsQueuedForLocalSimulation() throws {
         let session = CoordinatorTestSession(localPlayerID: "host")
         session.connectedPeerIDs = ["client"]
         let coordinator = MultiplayerSessionCoordinator(
@@ -514,7 +523,7 @@ struct MultiplayerSessionCoordinatorTests {
         session.deliver(try MultiplayerWireMessage.playerInput(input).encoded())
 
         #expect(coordinator.role == .host)
-        #expect(coordinator.consumeQueuedInputs().isEmpty)
+        #expect(coordinator.consumeQueuedInputs() == [input])
     }
 
     @Test("Accepted input is queued until the host consumes a simulation tick")
@@ -833,9 +842,9 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.consumeQueuedInputs() == [first])
     }
 
-    @Test("A client ignores gameplay events from a non-host peer")
+    @Test("A peer ignores gameplay events whose sender identity is not authenticated")
     @MainActor
-    func clientRejectsNonHostGameplayEvent() throws {
+    func peerRejectsUnauthenticatedGameplayEvent() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
         let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
         coordinator.start()
@@ -857,9 +866,9 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(received.isEmpty)
     }
 
-    @Test("A peer cannot spoof the host field in a gameplay event")
+    @Test("A peer cannot spoof the sender identity in a gameplay event")
     @MainActor
-    func clientRejectsGameplayEventWithForgedHostField() throws {
+    func peerRejectsGameplayEventWithForgedSenderIdentity() throws {
         let session = CoordinatorTestSession(localPlayerID: "client")
         let coordinator = MultiplayerSessionCoordinator(transport: session, sessionID: "match", startedAt: 20)
         coordinator.start()
