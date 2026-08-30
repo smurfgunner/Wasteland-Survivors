@@ -70,6 +70,11 @@ final class GameScene: SKScene {
         multiplayerSessionID.utf8.reduce(UInt64(1)) { ($0 &* 31) &+ UInt64($1) }
     }
     var authoritativeSimulationTick: UInt64 { authoritativeGameState?.tick ?? 0 }
+
+    func synchronizedPlayerTarget(forPlayerID playerID: String) -> String? {
+        synchronizedPlayerTargets[playerID] ?? nil
+    }
+
     private var lastClientRenderLogTime: TimeInterval = 0
     private var lastClientInputLogTime: TimeInterval = 0
     private var lastClientInputSendLogTime: TimeInterval = 0
@@ -415,7 +420,7 @@ final class GameScene: SKScene {
         } else {
             advanceOfflineSimulation(dt: dt)
         }
-        if !isAuthoritativeMultiplayerHost {
+        if isAuthoritativeMultiplayerHost || isMultiplayerClient {
             cameraNode.position = playerNode.position
         }
 
@@ -482,6 +487,9 @@ final class GameScene: SKScene {
                 slash.zPosition = 14
                 worldNode.addChild(slash)
 
+            case let .zombieKilled(zombieID, _):
+                removeZombie(withID: zombieID)
+
             default:
                 continue
             }
@@ -514,12 +522,12 @@ final class GameScene: SKScene {
             remotePlayer.equip(weapon: playerState.weapon)
         }
 
-        let stateZombieIDs = Set(state.zombies.map(\.id))
-        for zombie in zombies where !stateZombieIDs.contains(zombie.multiplayerID) {
+        let livingZombieIDs = Set(state.zombies.filter { $0.health > 0 }.map(\.id))
+        for zombie in zombies where !livingZombieIDs.contains(zombie.multiplayerID) {
             zombie.removeFromParent()
         }
-        zombies.removeAll { !stateZombieIDs.contains($0.multiplayerID) }
-        for zombieState in state.zombies {
+        zombies.removeAll { !livingZombieIDs.contains($0.multiplayerID) }
+        for zombieState in state.zombies where zombieState.health > 0 {
             let zombie = zombies.first { $0.multiplayerID == zombieState.id } ?? ZombieNode(multiplayerID: zombieState.id)
             if zombie.parent == nil {
                 worldNode.addChild(zombie)
@@ -1391,7 +1399,7 @@ extension GameScene {
         worldNode.addChild(slash)
     }
 
-    private func applyMultiplayerEvent(_ event: MultiplayerSyncEvent) {
+    func applyMultiplayerEvent(_ event: MultiplayerSyncEvent) {
         switch event {
         case let .playerTransformChanged(playerID, position, facing):
             guard let player = remotePlayers[playerID] else { return }
@@ -1408,6 +1416,7 @@ extension GameScene {
         case let .meleeAttack(attackID, playerID):
             renderMultiplayerMeleeAttack(attackID: attackID, playerID: playerID)
         case let .zombieHealthChanged(zombieID, _, health, _):
+            applyZombieHealth(health, forID: zombieID)
             zombies.first { $0.multiplayerID == zombieID }?.apply(multiplayerHealth: CGFloat(health))
         case let .playerDamaged(playerID, _, health, _):
             if playerID == multiplayerTransport?.localPeerID {
@@ -1427,11 +1436,8 @@ extension GameScene {
                 return true
             }
         case let .zombieDied(zombieID, _):
-            zombies.removeAll { zombie in
-                guard zombie.multiplayerID == zombieID else { return false }
-                zombie.removeFromParent()
-                return true
-            }
+            applyZombieHealth(0, forID: zombieID)
+            removeZombie(withID: zombieID)
         case let .playerDied(playerID):
             remotePlayers[playerID]?.removeFromParent()
             remotePlayers[playerID] = nil
@@ -1440,6 +1446,32 @@ extension GameScene {
             killCount = total
         case let .zombieTargetChanged(zombieID, playerID):
             synchronizedZombieTargets[zombieID] = playerID
+        }
+    }
+
+    private func applyZombieHealth(_ health: Double, forID zombieID: String) {
+        if var state = authoritativeGameState,
+           let zombieIndex = state.zombies.firstIndex(where: { $0.id == zombieID }) {
+            state.zombies[zombieIndex].health = max(0, health)
+            authoritativeGameState = state
+            authoritativeSimulationDriver?.replaceState(state)
+        }
+
+        guard var driver = clientPredictionDriver,
+              let zombieIndex = driver.state.zombies.firstIndex(where: { $0.id == zombieID }) else {
+            return
+        }
+        var state = driver.state
+        state.zombies[zombieIndex].health = max(0, health)
+        driver.replaceState(state)
+        clientPredictionDriver = driver
+    }
+
+    private func removeZombie(withID zombieID: String) {
+        zombies.removeAll { zombie in
+            guard zombie.multiplayerID == zombieID else { return false }
+            zombie.removeFromParent()
+            return true
         }
     }
 

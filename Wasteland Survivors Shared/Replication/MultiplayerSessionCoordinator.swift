@@ -234,12 +234,28 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
             }
         }
 
-        publishGameplayEvents(step.events, tick: step.state.tick)
+        publishGameplayEvents(step.events, state: step.state)
     }
 
     func publishGameplayEvents(_ events: [GameplayEvent], tick: UInt64) {
         for event in events {
-            publishEvent(MultiplayerSyncEvent(gameplayEvent: event, sourcePlayerID: transport.localPeerID), tick: tick)
+            publishEvent(
+                MultiplayerSyncEvent(gameplayEvent: event, sourcePlayerID: transport.localPeerID),
+                tick: tick
+            )
+        }
+    }
+
+    private func publishGameplayEvents(_ events: [GameplayEvent], state: GameState) {
+        for event in events {
+            publishEvent(
+                MultiplayerSyncEvent(
+                    gameplayEvent: event,
+                    sourcePlayerID: transport.localPeerID,
+                    state: state
+                ),
+                tick: state.tick
+            )
         }
     }
 
@@ -422,7 +438,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         case let .event(event):
             if case let .event(event) = message {
                 guard event.sequence > lastReceivedEventSequence else { return false }
-                guard event.sequence == lastReceivedEventSequence + 1 else {
+                let isReplaceableMovement = event.delivery == .replaceable && event.payload.isMovementEvent
+                guard isReplaceableMovement || event.sequence == lastReceivedEventSequence + 1 else {
                     onRecoveryRequested?(lastReceivedEventSequence + 1)
                     if let recovery = recoveryProvider?(lastReceivedEventSequence + 1) {
                         send(.recovery(recovery), to: peerID ?? transport.localPeerID)
@@ -434,10 +451,13 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
                     key: "\(event.sessionID):\(event.sequence)"
                 ) else { return false }
                 if var system = eventReplicationSystem {
-                    guard system.receive(event) == .accepted else { return false }
-                    eventReplicationSystem = system
+                    let result = system.receive(event)
+                    guard result == .accepted || isReplaceableMovement else { return false }
+                    if result == .accepted {
+                        eventReplicationSystem = system
+                    }
                 }
-                lastReceivedEventSequence = event.sequence
+                lastReceivedEventSequence = max(lastReceivedEventSequence, event.sequence)
                 nextGameplayEventSequence = max(nextGameplayEventSequence, event.sequence)
                 onEvent?(event)
             }
