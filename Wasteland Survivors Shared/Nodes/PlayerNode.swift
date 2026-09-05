@@ -119,7 +119,11 @@ final class PlayerNode: SKNode {
     }
 
     func apply(multiplayerHealth health: CGFloat) {
-        currentHealth = max(0, min(maxHealth, health))
+        let synchronizedHealth = max(0, min(maxHealth, health))
+        if synchronizedHealth < currentHealth {
+            regenerationCooldownRemaining = healthRegenerationDelay
+        }
+        currentHealth = synchronizedHealth
     }
 
     @discardableResult

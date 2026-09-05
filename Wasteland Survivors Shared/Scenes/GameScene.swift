@@ -405,6 +405,7 @@ final class GameScene: SKScene {
         if !hasReceivedFirstUpdate {
             hasReceivedFirstUpdate = true
             lastUpdateTime = gameTime
+            updateLocalPlayerHealthHUD()
             return
         }
         
@@ -1483,15 +1484,12 @@ extension GameScene {
         case let .playerDamaged(playerID, _, health, _):
             if playerID == multiplayerTransport?.localPeerID {
                 playerNode.apply(multiplayerHealth: CGFloat(health))
+                updateLocalPlayerHealthHUD()
             } else {
                 remotePlayers[playerID]?.apply(multiplayerHealth: CGFloat(health))
             }
         case let .itemCollected(entityID, _, _):
-            chests.removeAll { chest in
-                guard chest.multiplayerID == entityID else { return false }
-                chest.removeFromParent()
-                return true
-            }
+            chests.first { $0.multiplayerID == entityID }?.open()
             powerUps.removeAll { powerUp in
                 guard powerUp.multiplayerID == entityID else { return false }
                 powerUp.removeFromParent()
@@ -1509,6 +1507,14 @@ extension GameScene {
         case let .zombieTargetChanged(zombieID, playerID):
             synchronizedZombieTargets[zombieID] = playerID
         }
+    }
+
+    private func updateLocalPlayerHealthHUD() {
+        hudManager.updateHealth(
+            current: playerNode.currentHealth,
+            max: playerNode.maxHealth,
+            sceneWidth: size.width
+        )
     }
 
     private func applyZombieHealth(_ health: Double, forID zombieID: String) {
