@@ -81,6 +81,10 @@ jobs:
             exit 1
           fi
 
+      - name: Download Metal Toolchain
+        run: |
+          xcodebuild -downloadComponent MetalToolchain
+
       - name: Archive macOS app
         run: |
           xcodebuild \
