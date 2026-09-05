@@ -454,8 +454,14 @@ struct MultiplayerSessionCoordinatorTests {
             protocolVersion: 1
         )).encoded(), from: "client")
 
-        let first = MultiplayerPlayerInput(playerID: "client", sequence: 0, movement: .zero, aimAngle: 0, wantsToAttack: false)
-        let ambiguous = MultiplayerPlayerInput(playerID: "client", sequence: UInt64.max / 2, movement: .init(dx: 1, dy: 0), aimAngle: 0, wantsToAttack: false)
+        let first = MultiplayerPlayerInput(playerID: "client", sequence: 1, movement: .zero, aimAngle: 0, wantsToAttack: false)
+        let ambiguous = MultiplayerPlayerInput(
+            playerID: "client",
+            sequence: first.sequence &+ (UInt64(1) << 63),
+            movement: .init(dx: 1, dy: 0),
+            aimAngle: 0,
+            wantsToAttack: false
+        )
         session.deliver(try MultiplayerWireMessage.playerInput(first).encoded())
         session.deliver(try MultiplayerWireMessage.playerInput(ambiguous).encoded())
 

@@ -37,14 +37,31 @@ enum EventReplicationTestFixtures {
     static func event(
         sequence: UInt64,
         tick: UInt64,
-        senderID: String = clientID,
+        senderID: String? = nil,
         payload: MultiplayerSyncEvent
     ) -> MultiplayerEventEnvelope {
-        MultiplayerEventEnvelope(
+        let resolvedSenderID: String
+        if let senderID {
+            resolvedSenderID = senderID
+        } else {
+            switch payload {
+            case let .itemCollected(_, collectorID, _):
+                resolvedSenderID = collectorID
+            case let .zombieDied(_, killerID):
+                resolvedSenderID = killerID
+            case let .playerDied(playerID):
+                resolvedSenderID = playerID
+            case let .zombieHealthChanged(_, _, _, sourcePlayerID):
+                resolvedSenderID = sourcePlayerID
+            default:
+                resolvedSenderID = clientID
+            }
+        }
+        return MultiplayerEventEnvelope(
             sessionID: sessionID,
             sequence: sequence,
             simulationTick: tick,
-            senderID: senderID,
+            senderID: resolvedSenderID,
             payload: payload
         )
     }

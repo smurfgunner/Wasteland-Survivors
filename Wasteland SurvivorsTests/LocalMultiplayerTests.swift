@@ -540,6 +540,7 @@ struct LocalMultiplayerTests {
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         scene.didMove(to: view)
         scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("host")
         session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
             sessionID: "match",
             hostID: "host",

@@ -4,11 +4,24 @@ struct MultiplayerInitializationPlayer: Codable, Equatable, Sendable {
     let id: String
     let spawnPosition: CGPointValue
     let facing: Double
+    let health: Double
+    let weapon: WeaponType
+    let powerUps: [PowerUpType]
 
-    init(id: String, spawnPosition: CGPointValue, facing: Double = 0) {
+    init(
+        id: String,
+        spawnPosition: CGPointValue,
+        facing: Double = 0,
+        health: Double = 100,
+        weapon: WeaponType = .pistol,
+        powerUps: [PowerUpType] = []
+    ) {
         self.id = id
         self.spawnPosition = spawnPosition
         self.facing = facing
+        self.health = health
+        self.weapon = weapon
+        self.powerUps = powerUps
     }
 
     init(id: String, position: CGPointValue, facing: Double = 0) {
@@ -85,7 +98,9 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
         case let .projectileSpawned(projectileID, ownerID): self = .projectileSpawned(projectileID: projectileID, playerID: ownerID.isEmpty ? sourcePlayerID : ownerID)
         case let .meleeAttack(id, ownerID): self = .meleeAttack(attackID: id, playerID: ownerID.isEmpty ? sourcePlayerID : ownerID)
         case let .zombieDamaged(eventID, amount):
-            let zombie = state?.zombies.first { eventID.hasSuffix("-\($0.id)") }
+            let zombie = state?.zombies
+                .filter { eventID.hasSuffix("-\($0.id)") }
+                .max { $0.id.count < $1.id.count }
             self = .zombieHealthChanged(
                 zombieID: zombie?.id ?? eventID,
                 damage: amount,
@@ -96,12 +111,23 @@ enum MultiplayerSyncEvent: Codable, Equatable, Sendable {
         case let .chestOpened(id, playerID, weapon): self = .itemCollected(entityID: id, collectorID: playerID, result: .weapon(weapon))
         case let .powerUpCollected(id, playerID, type): self = .itemCollected(entityID: id, collectorID: playerID, result: .powerUp(type))
         case let .playerDamaged(eventID, amount):
-            let player = state?.players.first { eventID.contains("-\($0.id)-") }
+            let player = state?.players
+                .filter { eventID.contains("-\($0.id)-") }
+                .max { $0.id.count < $1.id.count }
+            let sourceID = state?.zombies.first {
+                eventID.hasPrefix("damage-\($0.id)-")
+            }?.id ?? {
+                guard let playerID = player?.id,
+                      let markerRange = eventID.range(of: "-\(playerID)-") else {
+                    return sourcePlayerID
+                }
+                return String(eventID[eventID.index(eventID.startIndex, offsetBy: 7)..<markerRange.lowerBound])
+            }()
             self = .playerDamaged(
                 playerID: player?.id ?? eventID,
                 damage: amount,
                 health: player?.health ?? 0,
-                sourceID: sourcePlayerID
+                sourceID: sourceID
             )
         case let .playerEliminated(id): self = .playerDied(playerID: id)
         case .matchEnded: self = .scoreChanged(delta: 0, total: 0)
@@ -231,6 +257,7 @@ struct EventReplicationSystem {
     private var outgoingRecipientsStorage: [String] = ["host", "client-2"]
     private var disconnected: Set<String> = []
     private var hasAppliedEmptyRecovery = false
+    private var lastAppliedRecovery: MultiplayerRecoveryPayload?
 
     init(localPlayerID: String, sessionID: String = "session-1") {
         self.localPlayerID = localPlayerID
@@ -238,7 +265,14 @@ struct EventReplicationSystem {
         players[localPlayerID] = (.zero, 0, .pistol, 100, false)
     }
 
-    mutating func receive(_ payload: MultiplayerInitializationPayload, from senderID: String? = nil) -> EventReplicationResult { guard payload.sessionID == sessionID else { return .rejectedWith(.wrongSession) }; guard senderID == nil || senderID == payload.hostID else { return .rejectedWith(.unauthorizedSender) }; guard payload.protocolVersion == 1 else { return .rejectedWith(.unsupportedVersion) }; guard Set(payload.players.map(\.id)).count == payload.players.count, Set(payload.zombies.map(\.id)).count == payload.zombies.count else { return .rejectedWith(.malformedPayload) }; guard payload.zombies.allSatisfy({ $0.health >= 0 && $0.health.isFinite }) else { return .rejectedWith(.malformedPayload) }; if isInitialized { return .duplicate }; isInitialized = true; seed = payload.seed; simulationTick = payload.simulationTick; lastAppliedSequence = payload.sequence; lastAppliedSequencesBySender[payload.hostID] = payload.sequence; players = Dictionary(uniqueKeysWithValues: payload.players.map { ($0.id, ($0.spawnPosition, 0, .pistol, 100, false)) }); zombies = Dictionary(uniqueKeysWithValues: payload.zombies.map { ($0.id, ($0.health, false)) }); let world = LocalWorldGenerator(seed: seed).world(at: simulationTick); activeChests = Set(world.chests); activePowerUps = Set(world.powerUps); for pending in pendingEvents.sorted(by: { $0.sequence < $1.sequence }) { _ = receive(pending) }; pendingEvents.removeAll(); return .accepted }
+    mutating func receive(_ payload: MultiplayerInitializationPayload, from senderID: String? = nil) -> EventReplicationResult { guard payload.sessionID == sessionID else { return .rejectedWith(.wrongSession) }; guard senderID == nil || senderID == payload.hostID else { return .rejectedWith(.unauthorizedSender) }; guard payload.protocolVersion == 1 else { return .rejectedWith(.unsupportedVersion) }; guard !payload.hostID.isEmpty,
+              payload.players.contains(where: { $0.id == payload.hostID }),
+              // Late joiners may not yet appear in the host's player list; the
+              // declared host is the participant required for authenticating initialization.
+              payload.players.allSatisfy({ !$0.id.isEmpty && $0.spawnPosition.x.isFinite && $0.spawnPosition.y.isFinite && $0.facing.isFinite }),
+              payload.zombies.allSatisfy({ !$0.id.isEmpty && $0.position.x.isFinite && $0.position.y.isFinite && $0.health >= 0 && $0.health.isFinite }),
+              Set(payload.players.map(\.id)).count == payload.players.count,
+              Set(payload.zombies.map(\.id)).count == payload.zombies.count else { return .rejectedWith(.malformedPayload) }; if isInitialized { return .duplicate }; isInitialized = true; seed = payload.seed; simulationTick = payload.simulationTick; lastAppliedSequence = payload.sequence; lastAppliedSequencesBySender[payload.hostID] = payload.sequence; players = Dictionary(uniqueKeysWithValues: payload.players.map { ($0.id, ($0.spawnPosition, $0.facing, $0.weapon, $0.health, $0.health <= 0)) }); zombies = Dictionary(uniqueKeysWithValues: payload.zombies.map { ($0.id, ($0.health, false)) }); let world = LocalWorldGenerator(seed: seed).world(at: simulationTick); activeChests = Set(world.chests); activePowerUps = Set(world.powerUps); for pending in pendingEvents.sorted(by: { $0.sequence < $1.sequence }) { _ = receive(pending) }; pendingEvents.removeAll(); return .accepted }
 
     mutating func receive(_ envelope: MultiplayerEventEnvelope) -> EventReplicationResult {
         guard isInitialized else {
@@ -248,12 +282,21 @@ struct EventReplicationSystem {
         guard !envelope.senderID.isEmpty else { return .rejectedWith(.invalidSender) }
         guard envelope.sessionID == sessionID else { return .rejectedWith(.wrongSession) }
         guard envelope.sequence > 0 else { return .rejectedWith(.invalidSequence) }
-        guard envelope.simulationTick > 0 else { return .rejectedWith(.inconsistentTick) }
+        guard envelope.simulationTick > 0 else {
+            return .rejectedWith(.inconsistentTick)
+        }
         guard !disconnected.contains(envelope.senderID) else { return .rejectedWith(.senderDisconnected) }
         let senderSequence = lastAppliedSequencesBySender[envelope.senderID] ?? lastAppliedSequence
         let eventKey = "\(envelope.senderID):\(envelope.sequence)"
         if envelope.sequence <= senderSequence {
             return appliedEvents[eventKey] == envelope ? .duplicate : .stale
+        }
+        guard envelope.simulationTick >= simulationTick else {
+            return .rejectedWith(.inconsistentTick)
+        }
+        guard isValidPayload(envelope.payload) else { return .rejectedWith(.malformedPayload) }
+        guard isAuthorized(envelope.payload, senderID: envelope.senderID) else {
+            return .rejectedWith(.unauthorizedSender)
         }
 
         let isReplaceableMovement = envelope.delivery == .replaceable && envelope.payload.isMovementEvent
@@ -290,10 +333,38 @@ struct EventReplicationSystem {
         guard recovery.firstSequence <= recovery.lastSequence else { return .rejectedWith(.invalidSequence) }
         let isEmptyBootstrap = recovery.firstSequence == 0 && recovery.lastSequence == 0 && recovery.simulationTick == 0
         if isEmptyBootstrap && hasAppliedEmptyRecovery { return .duplicate }
-        guard isEmptyBootstrap || recovery.lastSequence >= lastAppliedSequence else { return .duplicate }
-        guard Set(recovery.players.map(\.id)).count == recovery.players.count,
-              Set(recovery.zombies.map(\.id)).count == recovery.zombies.count,
-              recovery.zombies.allSatisfy({ $0.health >= 0 && $0.health.isFinite }) else {
+        if let lastAppliedRecovery, lastAppliedRecovery == recovery { return .duplicate }
+        guard isEmptyBootstrap ||
+              recovery.firstSequence == lastAppliedSequence ||
+              recovery.firstSequence == lastAppliedSequence + 1 else {
+            return .rejectedWith(.invalidSequence)
+        }
+        guard isEmptyBootstrap || recovery.simulationTick >= simulationTick else {
+            return .rejectedWith(.inconsistentTick)
+        }
+        guard isEmptyBootstrap || recovery.lastSequence >= lastAppliedSequence else {
+            return .duplicate
+        }
+        let playerIDs = Set(recovery.players.map(\.id))
+        let zombieIDs = Set(recovery.zombies.map(\.id))
+        let removedIDs = Set(recovery.removedEntities)
+        let targetPlayerIDs = Set(recovery.playerTargets.keys)
+        let targetZombieIDs = Set(recovery.zombieTargets.keys)
+        let targetValues = Set(recovery.playerTargets.values).union(recovery.zombieTargets.values)
+        guard playerIDs.count == recovery.players.count,
+              zombieIDs.count == recovery.zombies.count,
+              recovery.players.allSatisfy({ !$0.id.isEmpty && $0.spawnPosition.x.isFinite && $0.spawnPosition.y.isFinite && $0.facing.isFinite }),
+              recovery.zombies.allSatisfy({ !$0.id.isEmpty && $0.position.x.isFinite && $0.position.y.isFinite && $0.health >= 0 && $0.health.isFinite }),
+              recovery.playerHealth.keys.allSatisfy(playerIDs.contains),
+              recovery.equipment.keys.allSatisfy(playerIDs.contains),
+              Set(recovery.playerDeaths).isSubset(of: playerIDs),
+              targetPlayerIDs.isSubset(of: playerIDs),
+              targetZombieIDs.isSubset(of: zombieIDs),
+              targetValues.isSubset(of: playerIDs.union(zombieIDs)),
+              removedIDs.isDisjoint(with: playerIDs.union(zombieIDs).union(recovery.activeChests).union(recovery.activePowerUps)),
+              recovery.playerHealth.values.allSatisfy({ $0 >= 0 && $0.isFinite }),
+              Set(recovery.activeChests).allSatisfy({ !$0.isEmpty }),
+              Set(recovery.activePowerUps).allSatisfy({ !$0.isEmpty }) else {
             return .rejectedWith(.malformedPayload)
         }
 
@@ -305,6 +376,7 @@ struct EventReplicationSystem {
         activeChests = Set(recovery.activeChests)
         activePowerUps = Set(recovery.activePowerUps)
         targets = recovery.playerTargets.mapValues { Optional($0) }
+        targets.merge(recovery.zombieTargets.mapValues { Optional($0) }) { _, new in new }
         for id in recovery.removedEntities {
             players[id] = nil
             zombies[id] = nil
@@ -316,6 +388,7 @@ struct EventReplicationSystem {
         lastAppliedSequence = recovery.lastSequence
         simulationTick = recovery.simulationTick
         if isEmptyBootstrap { hasAppliedEmptyRecovery = true }
+        lastAppliedRecovery = recovery
         return .accepted
     }
     mutating func drainOutgoingEvents() -> [MultiplayerEventEnvelope] { defer { outgoing.removeAll() }; return outgoing }
@@ -332,6 +405,41 @@ struct EventReplicationSystem {
     func containsChest(_ id: String) -> Bool { activeChests.contains(id) }
     func containsPowerUp(_ id: String) -> Bool { activePowerUps.contains(id) }
     private func eventPlayerID(_ event: MultiplayerSyncEvent) -> String? { if case let .playerTransformChanged(id, _, _) = event { return id }; return nil }
+
+    private func isValidPayload(_ event: MultiplayerSyncEvent) -> Bool {
+        switch event {
+        case let .playerTransformChanged(_, position, facing):
+            return position.x.isFinite && position.y.isFinite && facing.isFinite
+        case let .zombieHealthChanged(_, damage, health, _):
+            return damage >= 0 && damage.isFinite && health >= 0 && health.isFinite
+        case let .playerDamaged(_, damage, health, _):
+            return damage >= 0 && damage.isFinite && health >= 0 && health.isFinite
+        case let .scoreChanged(delta, total):
+            return total == currentScore + delta || total == delta
+        default:
+            return true
+        }
+    }
+
+    private func isAuthorized(_ event: MultiplayerSyncEvent, senderID: String) -> Bool {
+        switch event {
+        case let .playerTransformChanged(id, _, _),
+             let .weaponChanged(id, _),
+             let .powerUpAcquired(id, _),
+             let .playerTargetChanged(id, _),
+             let .projectileSpawned(_, id),
+             let .meleeAttack(_, id),
+             let .itemCollected(_, id, _):
+            return id == senderID || senderID == "host"
+        case let .playerDied(id):
+            return id == senderID || senderID == "host"
+        case let .zombieHealthChanged(_, _, _, source),
+             let .zombieDied(_, source):
+            return players[source] == nil || source == senderID || senderID == "host"
+        case .playerDamaged, .zombieTargetChanged, .scoreChanged:
+            return true
+        }
+    }
     private mutating func apply(_ event: MultiplayerSyncEvent) -> Bool {
         switch event {
         case let .playerTransformChanged(id, position, facing):
