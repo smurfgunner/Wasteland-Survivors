@@ -1059,6 +1059,169 @@ struct LocalMultiplayerTests {
         #expect(scene.powerUps.map(\.multiplayerID) == ["power-up-1"])
     }
 
+    @Test("Recovery restores the local player's equipped weapon")
+    @MainActor
+    func recoveryRestoresLocalPlayerEquipment() throws {
+        // Given an initialized client with the default weapon.
+        let (scene, session) = try makeInitializedRecoveryClient()
+        #expect(scene.playerNode.currentWeapon == .pistol)
+        var recovery = makeSceneRecovery()
+        recovery.equipment = ["host": .sword, "client": .rifle]
+
+        // When authoritative recovery carries the equipped weapon state.
+        session.deliver(
+            try MultiplayerWireMessage.recovery(recovery).encoded(),
+            from: "host"
+        )
+
+        // Then both local and remote equipment match authoritative state.
+        #expect(scene.playerNode.currentWeapon == .rifle)
+        #expect(scene.remotePlayers["host"]?.currentWeapon == .sword)
+    }
+
+    @Test("Recovery applies local player death to the scene lifecycle")
+    @MainActor
+    func recoveryAppliesLocalPlayerDeath() throws {
+        // Given an active initialized client.
+        let (scene, session) = try makeInitializedRecoveryClient()
+        var recovery = makeSceneRecovery()
+        recovery.playerDeaths = ["client"]
+
+        // When recovery reports the local player as dead.
+        session.deliver(
+            try MultiplayerWireMessage.recovery(recovery).encoded(),
+            from: "host"
+        )
+
+        // Then the same game-over lifecycle used by a player-death event is applied.
+        #expect(scene.isGameOver)
+    }
+
+    @Test("Recovery removes dead remote players from the rendered world")
+    @MainActor
+    func recoveryRemovesDeadRemotePlayer() throws {
+        // Given an initialized client rendering its host.
+        let (scene, session) = try makeInitializedRecoveryClient()
+        let remoteHost = try #require(scene.remotePlayers["host"])
+        var recovery = makeSceneRecovery()
+        recovery.playerDeaths = ["host"]
+
+        // When recovery reports that remote player as dead.
+        session.deliver(
+            try MultiplayerWireMessage.recovery(recovery).encoded(),
+            from: "host"
+        )
+
+        // Then the player is absent from both lookup state and the scene graph.
+        #expect(scene.remotePlayers["host"] == nil)
+        #expect(remoteHost.parent == nil)
+    }
+
+    @Test("A late joiner receives the host's current weapon")
+    @MainActor
+    func lateJoinInitializationRestoresHostWeapon() throws {
+        // Given a host that changed weapons before another player joined.
+        let initialization = try makeLateJoinInitialization { player in
+            player.equip(weapon: .rifle)
+        }
+
+        // When a new client applies the host's current initialization.
+        let clientScene = try makeClientScene(initialization: initialization)
+
+        // Then the rendered host uses the authoritative equipped weapon.
+        #expect(clientScene.remotePlayers["host"]?.currentWeapon == .rifle)
+    }
+
+    @Test("A late joiner receives the host's current health")
+    @MainActor
+    func lateJoinInitializationRestoresHostHealth() throws {
+        // Given a host damaged before another player joined.
+        let initialization = try makeLateJoinInitialization { player in
+            player.apply(multiplayerHealth: 37)
+        }
+
+        // When a new client applies the host's current initialization.
+        let clientScene = try makeClientScene(initialization: initialization)
+
+        // Then the rendered host retains authoritative health.
+        #expect(clientScene.remotePlayers["host"]?.currentHealth == 37)
+    }
+
+    @Test("A late joiner receives the host's acquired power-ups")
+    @MainActor
+    func lateJoinInitializationRestoresHostPowerUps() throws {
+        // Given a host with an acquired upgrade before another player joined.
+        let initialization = try makeLateJoinInitialization { player in
+            _ = player.apply(powerUp: .damage)
+        }
+
+        // When a new client applies the host's current initialization.
+        let clientScene = try makeClientScene(initialization: initialization)
+
+        // Then the remote player exposes the same upgrade state.
+        #expect(clientScene.remotePlayers["host"]?.appliedPowerUpTypes == [.damage])
+    }
+
+    @Test("Host recovery includes the local player's equipment")
+    @MainActor
+    func hostRecoveryCapturesLocalPlayerEquipment() throws {
+        // Given a host whose local player changed weapons.
+        let recovery = try makeHostGeneratedRecovery { scene in
+            scene.playerNode.equip(weapon: .rifle)
+        }
+
+        // Then the recovery snapshot contains that authoritative equipment.
+        #expect(recovery.equipment["host"] == .rifle)
+    }
+
+    @Test("Host recovery includes synchronized player targets")
+    @MainActor
+    func hostRecoveryCapturesPlayerTargets() throws {
+        // Given a host with current player targeting state.
+        let recovery = try makeHostGeneratedRecovery { scene in
+            scene.applyMultiplayerEvent(.playerTargetChanged(
+                playerID: "host",
+                zombieID: "zombie-1"
+            ))
+        }
+
+        // Then recovery can reconstruct that target without replaying history.
+        #expect(recovery.playerTargets["host"] == "zombie-1")
+    }
+
+    @Test("Host recovery includes synchronized zombie targets")
+    @MainActor
+    func hostRecoveryCapturesZombieTargets() throws {
+        // Given a host with current zombie targeting state.
+        let recovery = try makeHostGeneratedRecovery { scene in
+            scene.applyMultiplayerEvent(.zombieTargetChanged(
+                zombieID: "zombie-1",
+                playerID: "host"
+            ))
+        }
+
+        // Then recovery can reconstruct that target without replaying history.
+        #expect(recovery.zombieTargets["zombie-1"] == "host")
+    }
+
+    @Test("A promoted client continues simulation from initialized authoritative state")
+    @MainActor
+    func hostMigrationDoesNotResetPromotedClientPosition() throws {
+        // Given a client initialized at an authoritative position away from its original spawn.
+        let (scene, session) = try makeInitializedRecoveryClient()
+        #expect(scene.playerNode.position == CGPoint(x: 180, y: 20))
+
+        // When the host disconnects and the remaining client becomes host.
+        session.peerDisconnected("host")
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        scene.update(0)
+        scene.update(1.0 / 60.0)
+
+        // Then simulation advances from the synchronized position without rollback.
+        #expect(scene.playerNode.position.x > 180)
+        #expect(scene.playerNode.position.y == 20)
+    }
+
 
     @Test("MultipeerConnectivity uses the transport identity in peer callbacks")
     func multipeerConnectivityUsesTransportIdentityInPeerCallbacks() {
@@ -1076,5 +1239,162 @@ struct LocalMultiplayerTests {
 
         #expect(session.state == .connecting)
         #expect(session.connectedPeerIDs.isEmpty)
+    }
+}
+
+@MainActor
+private extension LocalMultiplayerTests {
+    func makeHostGeneratedRecovery(
+        configureHost: (GameScene) -> Void
+    ) throws -> MultiplayerRecoveryPayload {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        scene.didMove(to: SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)))
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded(), from: "client")
+        configureHost(scene)
+
+        let eventAfterGap = MultiplayerEventEnvelope(
+            sessionID: "match",
+            sequence: 2,
+            simulationTick: 2,
+            senderID: "client",
+            payload: .scoreChanged(delta: 1, total: 1),
+            delivery: .reliable
+        )
+        session.deliver(
+            try MultiplayerWireMessage.event(eventAfterGap).encoded(),
+            from: "client"
+        )
+
+        return try #require(session.sentData.compactMap { data in
+            guard case let .recovery(payload) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            return payload
+        }.last)
+    }
+
+    func makeLateJoinInitialization(
+        configureHost: (PlayerNode) -> Void
+    ) throws -> MultiplayerInitializationPayload {
+        let session = FakeMultiplayerSession(localPlayerID: "host")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        scene.didMove(to: SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)))
+        scene.startLocalMultiplayer()
+        configureHost(scene.playerNode)
+        session.connectedPeerIDs.insert("client")
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 9_999_999_999,
+            protocolVersion: 1
+        )).encoded(), from: "client")
+        session.deliver(try MultiplayerWireMessage.joinRequest(.init(
+            sessionID: "match",
+            peerID: "client",
+            protocolVersion: 1
+        )).encoded(), from: "client")
+
+        return try #require(session.sentData.compactMap { data in
+            guard case let .initialization(payload) = try? MultiplayerWireMessage.decode(data) else {
+                return nil
+            }
+            return payload
+        }.last)
+    }
+
+    func makeClientScene(
+        initialization: MultiplayerInitializationPayload
+    ) throws -> GameScene {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        scene.didMove(to: SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600)))
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("host")
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        session.deliver(
+            try MultiplayerWireMessage.initialization(initialization).encoded(),
+            from: "host"
+        )
+        return scene
+    }
+
+    func makeInitializedRecoveryClient() throws -> (GameScene, FakeMultiplayerSession) {
+        let session = FakeMultiplayerSession(localPlayerID: "client")
+        let scene = GameScene.newGameScene(
+            size: CGSize(width: 800, height: 600),
+            multiplayerSessionID: "match",
+            multiplayerSessionFactory: { session }
+        )
+        let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        scene.didMove(to: view)
+        scene.startLocalMultiplayer()
+        session.connectedPeerIDs.insert("host")
+        session.deliver(try MultiplayerWireMessage.hostAnnouncement(.init(
+            sessionID: "match",
+            hostID: "host",
+            hostStartedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        session.deliver(try MultiplayerWireMessage.initialization(.init(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 240,
+            seed: 0xCAFE,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .init(x: 100, y: 20)),
+                .init(id: "client", spawnPosition: .init(x: 180, y: 20))
+            ],
+            zombies: []
+        )).encoded(), from: "host")
+        return (scene, session)
+    }
+
+    func makeSceneRecovery() -> MultiplayerRecoveryPayload {
+        MultiplayerRecoveryPayload(
+            sessionID: "match",
+            firstSequence: 2,
+            lastSequence: 2,
+            simulationTick: 241,
+            players: [
+                .init(id: "host", spawnPosition: .init(x: 100, y: 20)),
+                .init(id: "client", spawnPosition: .init(x: 180, y: 20))
+            ],
+            zombies: [],
+            activeChests: [],
+            activePowerUps: [],
+            score: 0,
+            playerHealth: ["host": 100, "client": 100],
+            playerTargets: [:],
+            zombieTargets: [:],
+            equipment: ["host": .pistol, "client": .pistol],
+            removedEntities: [],
+            playerDeaths: []
+        )
     }
 }

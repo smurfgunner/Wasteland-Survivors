@@ -260,6 +260,22 @@ struct GameSceneIntegrationTests {
         #expect(scene.cameraNode.childNode(withName: "mainMenu") != nil)
         #expect(scene.cameraNode.childNode(withName: "pauseMenu") == nil)
     }
+
+    @Test("Releasing a movement key immediately stops player movement")
+    func releasingMovementKeyStopsPlayerMovement() throws {
+        let scene = makeScene()
+        scene.update(1)
+
+        scene.keyDown(with: try keyEvent(keyCode: 2))
+        scene.update(1.1)
+        let positionAfterMovement = scene.playerNode.position
+        #expect(positionAfterMovement.x > 0)
+
+        scene.keyUp(with: try keyEvent(type: .keyUp, keyCode: 2))
+        scene.update(1.2)
+
+        #expect(scene.playerNode.position == positionAfterMovement)
+    }
     #endif
 
     @Test("Game scene creates the playable world with real nodes")
@@ -649,6 +665,20 @@ struct GameSceneIntegrationTests {
         #expect(abs(zombie.zRotation - atan2(-zombie.position.y, -zombie.position.x)) < 0.1)
     }
 
+    @Test("Resuming after a long lifecycle pause bounds simulation catch-up")
+    func longPauseDoesNotReplayUnboundedSimulationTicks() {
+        // Given an active scene that has processed its initial frame.
+        let scene = makeScene()
+        scene.update(1)
+        let tickBeforePause = scene.authoritativeSimulationTick
+
+        // When the next frame arrives sixty seconds later, as after suspension.
+        scene.update(61)
+
+        // Then catch-up is bounded to a small recovery window instead of replaying a minute.
+        #expect(scene.authoritativeSimulationTick <= tickBeforePause + 15)
+    }
+
     private func makeScene(started: Bool = true) -> GameScene {
         let scene = GameScene.newGameScene(size: CGSize(width: 800, height: 600))
         let view = SKView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
@@ -660,10 +690,10 @@ struct GameSceneIntegrationTests {
     }
 
     #if os(macOS)
-    private func keyEvent(keyCode: UInt16) throws -> NSEvent {
+    private func keyEvent(type: NSEvent.EventType = .keyDown, keyCode: UInt16) throws -> NSEvent {
         try #require(
             NSEvent.keyEvent(
-                with: .keyDown,
+                with: type,
                 location: .zero,
                 modifierFlags: [],
                 timestamp: 0,

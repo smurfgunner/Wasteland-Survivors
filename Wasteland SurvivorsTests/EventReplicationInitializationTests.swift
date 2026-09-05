@@ -116,6 +116,54 @@ struct EventReplicationInitializationTests {
         #expect(system.receive(payload) == .rejected(.malformedPayload))
     }
 
+    @Test("Initialization rejects empty player and host identities")
+    func initializationRejectsEmptyIdentities() {
+        var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
+        var payload = EventReplicationTestFixtures.initialization(hostID: "")
+        payload.players = [
+            .init(id: "", spawnPosition: .zero),
+            .init(id: EventReplicationTestFixtures.clientID, spawnPosition: .zero)
+        ]
+
+        #expect(system.receive(payload) == .rejected(.malformedPayload))
+    }
+
+    @Test("Initialization rejects non-finite player transforms")
+    func initializationRejectsNonFinitePlayerTransforms() {
+        var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
+        var payload = EventReplicationTestFixtures.initialization()
+        payload.players = [
+            .init(
+                id: EventReplicationTestFixtures.hostID,
+                spawnPosition: .init(x: .infinity, y: .nan),
+                facing: .nan
+            ),
+            .init(id: EventReplicationTestFixtures.clientID, spawnPosition: .zero)
+        ]
+
+        #expect(system.receive(payload) == .rejected(.malformedPayload))
+    }
+
+    @Test("Initialization rejects non-finite zombie positions")
+    func initializationRejectsNonFiniteZombiePositions() {
+        var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
+        var payload = EventReplicationTestFixtures.initialization()
+        payload.zombies = [
+            .init(id: "zombie-1", position: .init(x: .nan, y: 0), health: 100)
+        ]
+
+        #expect(system.receive(payload) == .rejected(.malformedPayload))
+    }
+
+    @Test("Initialization must include the declared host and receiving client")
+    func initializationRejectsMissingSessionParticipants() {
+        var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
+        var payload = EventReplicationTestFixtures.initialization()
+        payload.players = [.init(id: "unrelated-player", spawnPosition: .zero)]
+
+        #expect(system.receive(payload) == .rejected(.malformedPayload))
+    }
+
     @Test("Initialization reconstructs chests and power-ups from seed and tick")
     func initializationReconstructsChestsAndPowerUpsFromSeedAndTick() {
         var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
@@ -130,7 +178,7 @@ struct EventReplicationInitializationTests {
     @Test("Initialization restores the current event sequence")
     func initializationRestoresCurrentEventSequence() {
         var system = EventReplicationSystem(localPlayerID: EventReplicationTestFixtures.clientID)
-        var payload = EventReplicationTestFixtures.initialization(sequence: 900)
+        let payload = EventReplicationTestFixtures.initialization(sequence: 900)
 
         #expect(system.receive(payload) == .accepted)
         #expect(system.lastAppliedSequence == 900)

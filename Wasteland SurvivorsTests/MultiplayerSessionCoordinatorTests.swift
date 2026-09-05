@@ -944,6 +944,329 @@ struct MultiplayerSessionCoordinatorTests {
         #expect(coordinator.consumeQueuedInputs().isEmpty)
     }
 
+    @Test("The first player input sequence must be greater than zero")
+    @MainActor
+    func hostRejectsZeroInputSequence() throws {
+        // Given a host with a connected client.
+        let session = CoordinatorTestSession(localPlayerID: "host")
+        session.connectedPeerIDs = ["client"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 1
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "client",
+            startedAt: 20,
+            protocolVersion: 1
+        )).encoded(), from: "client")
+
+        // When the client sends the reserved zero sequence.
+        let invalidInput = MultiplayerPlayerInput(
+            playerID: "client",
+            sequence: 0,
+            movement: .zero,
+            aimAngle: 0,
+            wantsToAttack: false
+        )
+        session.deliver(
+            try MultiplayerWireMessage.playerInput(invalidInput).encoded(),
+            from: "client"
+        )
+
+        // Then the input is rejected instead of becoming the ordering baseline.
+        #expect(coordinator.consumeQueuedInputs().isEmpty)
+    }
+
+    @Test("A recovery payload is accepted only from the negotiated host")
+    @MainActor
+    func clientRejectsRecoveryFromNonHostPeer() throws {
+        // Given a client initialized by its negotiated host.
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        session.connectedPeerIDs = ["host", "attacker"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "host",
+            startedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        session.deliver(try MultiplayerWireMessage.initialization(.init(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 10,
+            seed: 42,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .zero)
+            ],
+            zombies: []
+        )).encoded(), from: "host")
+        var appliedRecoveries: [MultiplayerRecoveryPayload] = []
+        coordinator.onRecovery = { appliedRecoveries.append($0) }
+
+        // When another connected peer injects a correctly shaped recovery payload.
+        let forgedRecovery = MultiplayerRecoveryPayload(
+            sessionID: "match",
+            firstSequence: 2,
+            lastSequence: 2,
+            simulationTick: 11,
+            players: [.init(id: "client", spawnPosition: .init(x: 900, y: 900))],
+            zombies: [],
+            activeChests: [],
+            activePowerUps: [],
+            score: 999,
+            playerTargets: [:],
+            zombieTargets: [:],
+            equipment: [:],
+            removedEntities: [],
+            playerDeaths: []
+        )
+        session.deliver(
+            try MultiplayerWireMessage.recovery(forgedRecovery).encoded(),
+            from: "attacker"
+        )
+
+        // Then the unauthenticated state replacement never reaches the game layer.
+        #expect(appliedRecoveries.isEmpty)
+    }
+
+    @Test("Initialization cannot replace state after a host has been negotiated")
+    @MainActor
+    func clientRejectsInitializationFromNonHostPeer() throws {
+        // Given a client that has negotiated and initialized with its host.
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        session.connectedPeerIDs = ["host", "attacker"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "host",
+            startedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        let legitimateInitialization = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 10,
+            seed: 42,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .zero)
+            ],
+            zombies: []
+        )
+        session.deliver(
+            try MultiplayerWireMessage.initialization(legitimateInitialization).encoded(),
+            from: "host"
+        )
+        var appliedInitializations: [MultiplayerInitializationPayload] = []
+        coordinator.onInitialization = { appliedInitializations.append($0) }
+
+        // When another peer declares itself as host inside a replacement snapshot.
+        let forgedInitialization = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 2,
+            simulationTick: 11,
+            seed: 999,
+            hostID: "attacker",
+            players: [.init(id: "client", spawnPosition: .init(x: 900, y: 900))],
+            zombies: []
+        )
+        session.deliver(
+            try MultiplayerWireMessage.initialization(forgedInitialization).encoded(),
+            from: "attacker"
+        )
+
+        // Then only the negotiated host retains authority to initialize game state.
+        #expect(appliedInitializations.isEmpty)
+        #expect(coordinator.hostID == "host")
+    }
+
+    @Test("Coordinator accepts initialization exactly once per connection")
+    @MainActor
+    func duplicateInitializationFromHostIsIgnored() throws {
+        // Given a client connected to its negotiated host.
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        session.connectedPeerIDs = ["host"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "host",
+            startedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        let initialization = MultiplayerInitializationPayload(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 10,
+            seed: 42,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .zero)
+            ],
+            zombies: []
+        )
+        var appliedInitializations: [MultiplayerInitializationPayload] = []
+        coordinator.onInitialization = { appliedInitializations.append($0) }
+
+        // When the host retransmits the same full-state initialization.
+        let data = try MultiplayerWireMessage.initialization(initialization).encoded()
+        session.deliver(data, from: "host")
+        session.deliver(data, from: "host")
+
+        // Then the full-state transfer reaches the game layer once.
+        #expect(appliedInitializations == [initialization])
+    }
+
+    @Test("Disconnected peers cannot inject event-only gameplay state")
+    @MainActor
+    func eventFromDisconnectedPeerIsRejected() throws {
+        // Given a client initialized by its host with no attacker connection.
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        session.connectedPeerIDs = ["host"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "host",
+            startedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        session.deliver(try MultiplayerWireMessage.initialization(.init(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 10,
+            seed: 42,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .zero)
+            ],
+            zombies: []
+        )).encoded(), from: "host")
+        var appliedEvents: [MultiplayerEventEnvelope] = []
+        coordinator.onEvent = { appliedEvents.append($0) }
+
+        // When a peer absent from transport membership sends a valid-looking event.
+        let injectedEvent = MultiplayerEventEnvelope(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 11,
+            senderID: "attacker",
+            payload: .playerTransformChanged(
+                playerID: "attacker",
+                position: .init(x: 900, y: 900),
+                facing: 0
+            ),
+            delivery: .replaceable
+        )
+        session.deliver(
+            try MultiplayerWireMessage.event(injectedEvent).encoded(),
+            from: "attacker"
+        )
+
+        // Then transport membership prevents the event reaching the game layer.
+        #expect(appliedEvents.isEmpty)
+    }
+
+    @Test("A client detecting a gap never publishes its local state as authoritative recovery")
+    @MainActor
+    func clientGapDoesNotSendClientAuthoredRecoveryToHost() throws {
+        // Given a client initialized by the negotiated host.
+        let session = CoordinatorTestSession(localPlayerID: "client")
+        session.connectedPeerIDs = ["host"]
+        let coordinator = MultiplayerSessionCoordinator(
+            transport: session,
+            sessionID: "match",
+            startedAt: 20
+        )
+        coordinator.start()
+        session.deliver(try MultiplayerWireMessage.hello(.init(
+            sessionID: "match",
+            peerID: "host",
+            startedAt: 1,
+            protocolVersion: 1
+        )).encoded(), from: "host")
+        session.deliver(try MultiplayerWireMessage.initialization(.init(
+            sessionID: "match",
+            sequence: 1,
+            simulationTick: 10,
+            seed: 42,
+            hostID: "host",
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .zero)
+            ],
+            zombies: []
+        )).encoded(), from: "host")
+        coordinator.recoveryProvider = { firstSequence in
+            MultiplayerRecoveryPayload(
+                sessionID: "match",
+                firstSequence: firstSequence,
+                lastSequence: 3,
+                simulationTick: 12,
+                players: [.init(id: "client", spawnPosition: .init(x: 900, y: 900))],
+                zombies: [],
+                activeChests: [],
+                activePowerUps: [],
+                score: 999,
+                playerTargets: [:],
+                zombieTargets: [:],
+                equipment: [:],
+                removedEntities: [],
+                playerDeaths: []
+            )
+        }
+        var requestedSequences: [UInt64] = []
+        coordinator.onRecoveryRequested = { requestedSequences.append($0) }
+        session.messages.removeAll()
+
+        // When a reliable host event arrives with a sequence gap.
+        let eventAfterGap = MultiplayerEventEnvelope(
+            sessionID: "match",
+            sequence: 3,
+            simulationTick: 12,
+            senderID: "host",
+            payload: .scoreChanged(delta: 1, total: 1),
+            delivery: .reliable
+        )
+        session.deliver(
+            try MultiplayerWireMessage.event(eventAfterGap).encoded(),
+            from: "host"
+        )
+
+        // Then the gap is reported without treating client prediction as authority.
+        #expect(requestedSequences == [2])
+        #expect(session.messages.contains {
+            if case .recovery = $0 { return true }
+            return false
+        } == false)
+    }
+
 @MainActor
 private final class CoordinatorTestSession: MultiplayerTransport {
     weak var delegate: MultiplayerTransportDelegate?
@@ -972,8 +1295,22 @@ private final class CoordinatorTestSession: MultiplayerTransport {
     func releaseHeld(at index: Int, from peerID: String? = "host") { let data = heldData.remove(at: index); deliverImmediately(data, from: peerID) }
     func duplicateHeld(at index: Int, from peerID: String? = "host") { deliverImmediately(heldData[index], from: peerID) }
     func dropHeld(at index: Int) { heldData.remove(at: index) }
-    private func deliverImmediately(_ data: Data, from peerID: String? = nil) { guard let message = try? MultiplayerWireMessage.decode(data) else { return }; delegate?.transport(self, didReceive: data, from: peerID ?? senderID(message)) }
-    private func record(_ data: Data) { if let message = try? MultiplayerWireMessage.decode(data) { messages.append(message) } }
+    private func deliverImmediately(_ data: Data, from peerID: String? = nil) {
+        do {
+            let message = try MultiplayerWireMessage.decode(data)
+            delegate?.transport(self, didReceive: data, from: peerID ?? senderID(message))
+        } catch {
+            Issue.record("Test transport could not decode delivered data: \(error)")
+        }
+    }
+
+    private func record(_ data: Data) {
+        do {
+            messages.append(try MultiplayerWireMessage.decode(data))
+        } catch {
+            Issue.record("Test transport could not decode sent data: \(error)")
+        }
+    }
     private func senderID(_ message: MultiplayerWireMessage) -> String {
         switch message {
         case let .hello(value): return value.peerID
