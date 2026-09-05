@@ -420,9 +420,7 @@ final class GameScene: SKScene {
         } else {
             advanceOfflineSimulation(dt: dt)
         }
-        if isAuthoritativeMultiplayerHost || isMultiplayerClient {
-            cameraNode.position = playerNode.position
-        }
+        cameraNode.position = playerNode.position
 
         if !isAuthoritativeMultiplayerHost && !isMultiplayerClient {
             return

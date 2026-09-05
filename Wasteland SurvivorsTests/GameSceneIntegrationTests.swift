@@ -546,6 +546,24 @@ struct GameSceneIntegrationTests {
         #expect(abs(scene.playerNode.zRotation - .pi / 2) < 0.001)
     }
 
+    @Test("Offline camera follows the local player through the real game loop")
+    func offlineCameraFollowsLocalPlayerThroughRealGameLoop() {
+        // Given an active offline game with movement away from the camera's starting point.
+        let scene = makeScene()
+        scene.movementVector = CGVector(dx: 1, dy: 0)
+        let startingPosition = scene.playerNode.position
+
+        // When several fixed simulation ticks move the rendered player.
+        scene.update(1)
+        for tick in 1...6 {
+            scene.update(1 + Double(tick) / 60.0)
+        }
+
+        // Then the player moved and the camera remains centered on that local player.
+        #expect(scene.playerNode.position != startingPosition)
+        #expect(scene.cameraNode.position == scene.playerNode.position)
+    }
+
     @Test("Offline fixed-tick simulation preserves zombie speed over one second")
     func offlineFixedTickSimulationPreservesZombieSpeedOverOneSecond() {
         let state = GameState(
