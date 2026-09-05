@@ -259,6 +259,7 @@ final class GameScene: SKScene {
             switch role {
             case .host:
                 self.hostID = session.localPeerID
+                self.authoritativeSimulationDriver = self.clientPredictionDriver
             case .client:
                 self.hostID = self.multiplayerCoordinator?.hostID
             default:
@@ -404,6 +405,7 @@ final class GameScene: SKScene {
         if !hasReceivedFirstUpdate {
             hasReceivedFirstUpdate = true
             lastUpdateTime = gameTime
+            updateLocalPlayerHealthHUD()
             return
         }
         
@@ -1134,13 +1136,19 @@ extension GameScene {
             MultiplayerInitializationPlayer(
                 id: session.localPeerID,
                 spawnPosition: localPosition,
-                facing: Double(playerNode.zRotation)
+                facing: Double(playerNode.zRotation),
+                health: Double(playerNode.currentHealth),
+                weapon: playerNode.currentWeapon,
+                powerUps: playerNode.appliedPowerUpTypes
             )
         ] + remotePlayers.map { id, node in
             MultiplayerInitializationPlayer(
                 id: id,
                 spawnPosition: CGPointValue(x: Double(node.position.x), y: Double(node.position.y)),
-                facing: Double(node.zRotation)
+                facing: Double(node.zRotation),
+                health: Double(node.currentHealth),
+                weapon: node.currentWeapon,
+                powerUps: node.appliedPowerUpTypes
             )
         }
         let zombies = (authoritativeState?.zombies ?? []).map {
@@ -1169,6 +1177,11 @@ extension GameScene {
             if player.id == session.localPeerID {
                 playerNode.position = player.spawnPosition.cgPoint
                 playerNode.zRotation = CGFloat(player.facing)
+                playerNode.apply(multiplayerHealth: CGFloat(player.health))
+                playerNode.equip(weapon: player.weapon)
+                for type in player.powerUps {
+                    _ = playerNode.apply(powerUp: type)
+                }
                 continue
             }
             let node = remotePlayers[player.id] ?? PlayerNode()
@@ -1178,6 +1191,11 @@ extension GameScene {
             }
             node.position = player.spawnPosition.cgPoint
             node.zRotation = CGFloat(player.facing)
+            node.apply(multiplayerHealth: CGFloat(player.health))
+            node.equip(weapon: player.weapon)
+            for type in player.powerUps {
+                _ = node.apply(powerUp: type)
+            }
         }
         for zombie in zombies { zombie.removeFromParent() }
         zombies = payload.zombies.map {
@@ -1192,7 +1210,7 @@ extension GameScene {
             seed: payload.seed,
             tick: payload.simulationTick,
             players: payload.players.map {
-                GamePlayerState(id: $0.id, position: $0.spawnPosition, rotation: $0.facing, health: 100, weapon: .pistol, powerUps: [])
+                GamePlayerState(id: $0.id, position: $0.spawnPosition, rotation: $0.facing, health: $0.health, weapon: $0.weapon, powerUps: $0.powerUps)
             },
             zombies: payload.zombies.map {
                 GameZombieState(id: $0.id, position: $0.position, rotation: 0, health: $0.health)
@@ -1250,11 +1268,22 @@ extension GameScene {
             playerHealth: Dictionary(uniqueKeysWithValues: ([playerNode] + Array(remotePlayers.values)).enumerated().map { index, player in
                 (index == 0 ? multiplayerTransport?.localPeerID ?? "local" : remotePlayers.first { $0.value === player }?.key ?? "remote-\(index)", Double(player.currentHealth))
             }),
-            playerTargets: [:],
-            zombieTargets: [:],
-            equipment: Dictionary(uniqueKeysWithValues: remotePlayers.map { ($0.key, $0.value.currentWeapon) }),
+            playerTargets: Dictionary(uniqueKeysWithValues: synchronizedPlayerTargets.compactMap { id, target in
+                target.map { (id, $0) }
+            }),
+            zombieTargets: Dictionary(uniqueKeysWithValues: synchronizedZombieTargets.compactMap { id, target in
+                target.map { (id, $0) }
+            }),
+            equipment: Dictionary(uniqueKeysWithValues: ([(
+                multiplayerTransport?.localPeerID ?? "local",
+                playerNode.currentWeapon
+            )] + remotePlayers.map { ($0.key, $0.value.currentWeapon) })),
             removedEntities: [],
-            playerDeaths: []
+            playerDeaths: ([playerNode] + Array(remotePlayers.values)).enumerated().compactMap { index, player in
+                player.currentHealth <= 0
+                    ? (index == 0 ? multiplayerTransport?.localPeerID ?? "local" : remotePlayers.first { $0.value === player }?.key)
+                    : nil
+            },
         )
     }
 
@@ -1272,7 +1301,11 @@ extension GameScene {
             if player.id == multiplayerTransport?.localPeerID {
                 playerNode.position = player.spawnPosition.cgPoint
                 playerNode.zRotation = CGFloat(player.facing)
-                playerNode.apply(multiplayerHealth: CGFloat(payload.playerHealth[player.id] ?? 100))
+                playerNode.apply(multiplayerHealth: CGFloat(payload.playerHealth[player.id] ?? player.health))
+                playerNode.equip(weapon: payload.equipment[player.id] ?? player.weapon)
+                for type in player.powerUps {
+                    _ = playerNode.apply(powerUp: type)
+                }
                 continue
             }
             let node = remotePlayers[player.id] ?? PlayerNode()
@@ -1282,9 +1315,10 @@ extension GameScene {
             }
             node.position = player.spawnPosition.cgPoint
             node.zRotation = CGFloat(player.facing)
-            node.apply(multiplayerHealth: CGFloat(payload.playerHealth[player.id] ?? 100))
-            if let weapon = payload.equipment[player.id] {
-                node.equip(weapon: weapon)
+            node.apply(multiplayerHealth: CGFloat(payload.playerHealth[player.id] ?? player.health))
+            node.equip(weapon: payload.equipment[player.id] ?? player.weapon)
+            for type in player.powerUps {
+                _ = node.apply(powerUp: type)
             }
         }
 
@@ -1352,6 +1386,15 @@ extension GameScene {
         }
         synchronizedPlayerTargets = payload.playerTargets.mapValues { Optional($0) }
         synchronizedZombieTargets = payload.zombieTargets.mapValues { Optional($0) }
+
+        for deadID in payload.playerDeaths {
+            if deadID == multiplayerTransport?.localPeerID {
+                triggerGameOver()
+            } else {
+                remotePlayers[deadID]?.removeFromParent()
+                remotePlayers[deadID] = nil
+            }
+        }
 
         let recoveredState = GameSceneStateAdapter.gameState(
             localPlayer: playerNode,
@@ -1441,15 +1484,12 @@ extension GameScene {
         case let .playerDamaged(playerID, _, health, _):
             if playerID == multiplayerTransport?.localPeerID {
                 playerNode.apply(multiplayerHealth: CGFloat(health))
+                updateLocalPlayerHealthHUD()
             } else {
                 remotePlayers[playerID]?.apply(multiplayerHealth: CGFloat(health))
             }
         case let .itemCollected(entityID, _, _):
-            chests.removeAll { chest in
-                guard chest.multiplayerID == entityID else { return false }
-                chest.removeFromParent()
-                return true
-            }
+            chests.first { $0.multiplayerID == entityID }?.open()
             powerUps.removeAll { powerUp in
                 guard powerUp.multiplayerID == entityID else { return false }
                 powerUp.removeFromParent()
@@ -1467,6 +1507,14 @@ extension GameScene {
         case let .zombieTargetChanged(zombieID, playerID):
             synchronizedZombieTargets[zombieID] = playerID
         }
+    }
+
+    private func updateLocalPlayerHealthHUD() {
+        hudManager.updateHealth(
+            current: playerNode.currentHealth,
+            max: playerNode.maxHealth,
+            sceneWidth: size.width
+        )
     }
 
     private func applyZombieHealth(_ health: Double, forID zombieID: String) {
@@ -1497,6 +1545,9 @@ extension GameScene {
 
     private func handleHostMigration() {
         hostID = multiplayerCoordinator?.hostID
+        if multiplayerCoordinator?.role == .host, authoritativeSimulationDriver == nil {
+            authoritativeSimulationDriver = clientPredictionDriver
+        }
     }
 
     private func rebuildSeededCollectibles(seed: UInt64, tick: UInt64) {

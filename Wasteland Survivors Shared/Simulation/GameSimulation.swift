@@ -278,6 +278,9 @@ struct GameSimulation {
         guard !state.isGameOver else {
             return SimulationStep(state: state, events: [])
         }
+        guard tick > state.tick else {
+            return SimulationStep(state: state, events: [])
+        }
 
         var next = state
         next.tick = tick
@@ -297,7 +300,8 @@ struct GameSimulation {
         )
 
         for index in next.players.indices {
-            guard let input = inputByPlayer[next.players[index].id] else { continue }
+            guard next.players[index].health > 0,
+                  let input = inputByPlayer[next.players[index].id] else { continue }
             let length = hypot(input.movement.x, input.movement.y)
             let scale = length > 1 ? 1 / length : 1
             next.players[index].position = next.players[index].position.adding(

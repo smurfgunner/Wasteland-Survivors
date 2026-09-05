@@ -199,6 +199,110 @@ struct MultiplayerCombatBehaviorTests {
         #expect(second.events.isEmpty)
     }
 
+    @Test("A dead player cannot move")
+    func deadPlayerInputDoesNotChangePosition() {
+        // Given an eliminated player with movement input.
+        let state = makeState(players: [
+            makePlayer(id: "player", position: .zero, health: 0)
+        ])
+
+        // When the simulation advances that input.
+        let step = GameSimulation().advance(
+            state,
+            inputs: [input(for: "player", movement: .init(x: 1, y: 0), sequence: 1)],
+            tick: 1
+        )
+
+        // Then eliminated players remain stationary.
+        #expect(step.state.players[0].position == .zero)
+    }
+
+    @Test("A dead player cannot rotate from aim input")
+    func deadPlayerInputDoesNotChangeFacing() {
+        // Given an eliminated player with a stable facing direction.
+        var player = makePlayer(id: "player", position: .zero, health: 0)
+        player.rotation = 0.25
+        let state = makeState(players: [player])
+        let input = PlayerInput(
+            playerID: "player",
+            sequence: 1,
+            movement: .zero,
+            aimAngle: 2.5
+        )
+
+        // When aim input is processed after elimination.
+        let step = GameSimulation().advance(state, inputs: [input], tick: 1)
+
+        // Then facing remains frozen with the rest of the dead player state.
+        #expect(step.state.players[0].rotation == 0.25)
+    }
+
+    @Test("A dead player cannot attack")
+    func deadPlayerInputDoesNotCreateAttack() {
+        // Given an eliminated ranged player and a living target in range.
+        let state = makeState(
+            players: [makePlayer(id: "player", position: .zero, health: 0)],
+            zombies: [makeZombie(id: "zombie", position: .init(x: 50, y: 0))]
+        )
+
+        // When attack input is processed.
+        let step = GameSimulation().advance(
+            state,
+            inputs: [input(for: "player", sequence: 1, wantsToAttack: true)],
+            tick: 1
+        )
+
+        // Then no projectile or attack event can be produced.
+        #expect(step.state.projectiles.isEmpty)
+        #expect(step.events.contains { if case .projectileSpawned = $0 { true } else { false } } == false)
+    }
+
+    @Test("A dead player cannot collect world items")
+    func deadPlayerInputDoesNotCollectItems() {
+        // Given an eliminated player overlapping a chest and power-up.
+        var state = makeState(players: [
+            makePlayer(id: "player", position: .zero, health: 0)
+        ])
+        state.chests = [.init(id: "chest", position: .zero, isOpened: false)]
+        state.powerUps = [.init(id: "power-up", position: .zero, type: .damage)]
+        let input = PlayerInput(
+            playerID: "player",
+            sequence: 1,
+            movement: .zero,
+            wantsToOpenChestID: "chest",
+            wantsToCollectPowerUpID: "power-up"
+        )
+
+        // When interaction input is processed.
+        let step = GameSimulation().advance(state, inputs: [input], tick: 1)
+
+        // Then authoritative world items remain untouched.
+        #expect(step.state.chests[0].isOpened == false)
+        #expect(step.state.powerUps.map(\.id) == ["power-up"])
+        #expect(step.events.contains {
+            switch $0 {
+            case .chestOpened, .powerUpCollected:
+                return true
+            default:
+                return false
+            }
+        } == false)
+    }
+
+    @Test("Simulation cannot move its authoritative tick backwards")
+    func simulationRejectsRegressingTick() {
+        // Given state already committed at a later tick.
+        var state = makeState(players: [makePlayer(id: "player", position: .zero)])
+        state.tick = 100
+
+        // When stale work attempts to advance tick 99.
+        let step = GameSimulation().advance(state, inputs: [], tick: 99)
+
+        // Then authoritative time remains monotonic and no work is emitted.
+        #expect(step.state.tick == 100)
+        #expect(step.events.isEmpty)
+    }
+
     @Test("One eliminated player does not end a two-player match")
     func oneEliminatedPlayerDoesNotEndATwoPlayerMatch() {
         // Given one dead player and one living player.

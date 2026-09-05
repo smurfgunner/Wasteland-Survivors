@@ -31,7 +31,8 @@ struct FixedTickSimulationDriver {
         // The epsilon prevents a mathematically complete tick from being
         // lost because elapsed-time values such as 1/60 cannot be represented
         // exactly in binary floating point.
-        while accumulatedTime + 1e-9 >= tickDuration {
+        let maximumCatchUpSteps = elapsedTime > 5 ? 15 : Int.max
+        while accumulatedTime + 1e-9 >= tickDuration && steps.count < maximumCatchUpSteps {
             accumulatedTime -= tickDuration
             let inputsForTick = isFirstStep ? inputs : inputs.map {
                 PlayerInput(
@@ -54,6 +55,11 @@ struct FixedTickSimulationDriver {
             isFirstStep = false
         }
 
+        // A long pause should resynchronize on the next frame instead of replaying
+        // an unbounded backlog of simulation ticks.
+        if steps.count == 15 {
+            accumulatedTime = 0
+        }
         return steps
     }
 

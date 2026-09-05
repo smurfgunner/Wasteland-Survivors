@@ -273,7 +273,7 @@ struct FullMultiplayerGameplayTests {
         let hostWeaponEvent = MultiplayerEventEnvelope(
             sessionID: "full-match",
             sequence: hostEventSequence,
-            simulationTick: initialization.simulationTick + 3,
+            simulationTick: initialization.simulationTick + 5,
             senderID: "host",
             payload: .weaponChanged(playerID: "host", weapon: .sword)
         )
@@ -282,7 +282,7 @@ struct FullMultiplayerGameplayTests {
         let hostPowerUpEvent = MultiplayerEventEnvelope(
             sessionID: "full-match",
             sequence: hostEventSequence + 1,
-            simulationTick: initialization.simulationTick + 4,
+            simulationTick: initialization.simulationTick + 6,
             senderID: "host",
             payload: .powerUpAcquired(playerID: "host", type: hostPowerUp)
         )

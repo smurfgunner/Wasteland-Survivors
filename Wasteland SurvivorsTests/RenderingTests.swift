@@ -347,6 +347,54 @@ struct RenderingTests {
     @MainActor
     func metalRendererBuildsPipelineFromInjectedShaderLibrary() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
+        let library = try makeMetalLibrary(device: device)
+        let view = MTKView(frame: CGRect(x: 0, y: 0, width: 4, height: 4), device: device)
+        view.colorPixelFormat = .rgba8Unorm
+
+        let renderer = MetalGameRenderer(
+            view: view,
+            onFrame: { _ in [] },
+            library: library
+        )
+
+        #expect(renderer != nil)
+    }
+
+    @Test("Metal renderer fails cleanly when required shader functions are absent")
+    func metalRendererRejectsIncompleteShaderLibrary() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(
+            source: "kernel void unrelatedShader() {}",
+            options: nil
+        )
+        let view = MTKView(frame: CGRect(x: 0, y: 0, width: 4, height: 4), device: device)
+
+        #expect(MetalGameRenderer(view: view, onFrame: { _ in [] }, library: library) == nil)
+    }
+
+    @Test("Metal renderer still advances the game frame when no drawable is available")
+    func metalRendererInvokesFrameProducerWithoutDrawable() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let library = try makeMetalLibrary(device: device)
+        let view = MTKView(frame: .zero, device: device)
+        var frameCount = 0
+        let renderer = try #require(
+            MetalGameRenderer(
+                view: view,
+                onFrame: { _ in
+                    frameCount += 1
+                    return []
+                },
+                library: library
+            )
+        )
+
+        renderer.draw(in: view)
+
+        #expect(frameCount == 1)
+    }
+
+    private func makeMetalLibrary(device: MTLDevice) throws -> MTLLibrary {
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -362,16 +410,6 @@ struct RenderingTests {
             return input.color;
         }
         """
-        let library = try device.makeLibrary(source: source, options: nil)
-        let view = MTKView(frame: CGRect(x: 0, y: 0, width: 4, height: 4), device: device)
-        view.colorPixelFormat = .rgba8Unorm
-
-        let renderer = MetalGameRenderer(
-            view: view,
-            onFrame: { _ in [] },
-            library: library
-        )
-
-        #expect(renderer != nil)
+        return try device.makeLibrary(source: source, options: nil)
     }
 }

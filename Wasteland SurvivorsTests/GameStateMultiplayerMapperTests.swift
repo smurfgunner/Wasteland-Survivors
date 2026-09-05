@@ -63,4 +63,95 @@ struct GameStateMultiplayerMapperTests {
 
         #expect(try MultiplayerWireMessage.decode(message.encoded()) == message)
     }
+
+    @Test("Zombie damage maps the exact entity when identifiers share suffixes")
+    func zombieDamageMapsExactIdentifier() {
+        // Given two zombies whose identifiers overlap at a delimiter boundary.
+        let state = makeState(
+            players: [.init(id: "host", position: .zero, rotation: 0, health: 100, weapon: .pistol, powerUps: [])],
+            zombies: [
+                .init(id: "1", position: .zero, rotation: 0, health: 80),
+                .init(id: "zombie-1", position: .zero, rotation: 0, health: 40)
+            ]
+        )
+
+        // When the simulation event for zombie-1 is mapped to replication.
+        let event = MultiplayerSyncEvent(
+            gameplayEvent: .zombieDamaged(id: "damage-10-zombie-1", amount: 10),
+            sourcePlayerID: "host",
+            state: state
+        )
+
+        // Then the exact zombie and its authoritative health are preserved.
+        #expect(event == .zombieHealthChanged(
+            zombieID: "zombie-1",
+            damage: 10,
+            health: 40,
+            sourcePlayerID: "host"
+        ))
+    }
+
+    @Test("Player damage maps the exact entity when identifiers overlap")
+    func playerDamageMapsExactIdentifier() {
+        // Given players whose identifiers overlap inside the encoded event ID.
+        let state = makeState(players: [
+            .init(id: "client", position: .zero, rotation: 0, health: 90, weapon: .pistol, powerUps: []),
+            .init(id: "client-2", position: .zero, rotation: 0, health: 55, weapon: .pistol, powerUps: [])
+        ])
+
+        // When damage for client-2 is mapped.
+        let event = MultiplayerSyncEvent(
+            gameplayEvent: .playerDamaged(id: "damage-zombie-1-client-2-10", amount: 12),
+            sourcePlayerID: "host",
+            state: state
+        )
+
+        // Then client-2 receives its own authoritative health.
+        #expect(event == .playerDamaged(
+            playerID: "client-2",
+            damage: 12,
+            health: 55,
+            sourceID: "zombie-1"
+        ))
+    }
+
+    @Test("Player damage preserves the attacking zombie identity")
+    func playerDamagePreservesZombieSource() {
+        // Given authoritative damage produced by a specific zombie.
+        let state = makeState(players: [
+            .init(id: "client", position: .zero, rotation: 0, health: 88, weapon: .pistol, powerUps: [])
+        ])
+
+        // When the event is mapped for replication by the host.
+        let event = MultiplayerSyncEvent(
+            gameplayEvent: .playerDamaged(id: "damage-zombie-7-client-10", amount: 12),
+            sourcePlayerID: "host",
+            state: state
+        )
+
+        // Then the damage source remains the zombie, not the forwarding host.
+        #expect(event == .playerDamaged(
+            playerID: "client",
+            damage: 12,
+            health: 88,
+            sourceID: "zombie-7"
+        ))
+    }
+
+    private func makeState(
+        players: [GamePlayerState],
+        zombies: [GameZombieState] = []
+    ) -> GameState {
+        GameState(
+            seed: 42,
+            tick: 10,
+            players: players,
+            zombies: zombies,
+            chests: [],
+            powerUps: [],
+            projectiles: [],
+            score: 0,
+            isGameOver: false
+        )
+    }
 }

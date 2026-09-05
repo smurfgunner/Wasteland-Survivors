@@ -4,6 +4,69 @@ import Testing
 
 @Suite(.serialized)
 struct SimulationRegressionTests {
+    @Test("Irregular render frames converge with fixed sixty-Hz frames over ten seconds")
+    func irregularFramePartitioningRemainsDeterministicLongTerm() {
+        // Given identical simulations receiving the same continuous movement intent.
+        let initial = GameState.initial(seed: 42, playerID: "player")
+        let input = PlayerInput(
+            playerID: "player",
+            sequence: 1,
+            movement: .init(x: 1, y: 0)
+        )
+        var fixedFrames = FixedTickSimulationDriver(initialState: initial)
+        var irregularFrames = FixedTickSimulationDriver(initialState: initial)
+
+        // When ten seconds are partitioned into fixed and irregular frame durations.
+        for _ in 0..<600 {
+            _ = fixedFrames.advance(elapsedTime: 1.0 / 60.0, inputs: [input])
+        }
+        for _ in 0..<200 {
+            _ = irregularFrames.advance(elapsedTime: 1.0 / 30.0, inputs: [input])
+            _ = irregularFrames.advance(elapsedTime: 1.0 / 120.0, inputs: [input])
+            _ = irregularFrames.advance(elapsedTime: 1.0 / 120.0, inputs: [input])
+        }
+
+        // Then render cadence has no effect on authoritative state.
+        #expect(irregularFrames.state == fixedFrames.state)
+        #expect(irregularFrames.state.tick == 600)
+    }
+
+    @Test("Long-running simulation keeps resources and numeric state bounded")
+    func longRunningSimulationMaintainsResourceBounds() {
+        // Given a deterministic game running continuously for ten thousand ticks.
+        var driver = FixedTickSimulationDriver(
+            initialState: GameState.initial(seed: 42, playerID: "player")
+        )
+        let input = PlayerInput(
+            playerID: "player",
+            sequence: 1,
+            movement: .zero,
+            wantsToAttack: true
+        )
+
+        // When the long session advances.
+        for _ in 0..<10_000 {
+            _ = driver.advance(elapsedTime: 1.0 / 60.0, inputs: [input])
+        }
+
+        // Then entity collections stay within production limits and values remain finite.
+        #expect(driver.state.zombies.filter { $0.health > 0 }.count <= GameSimulation.Configuration.standard.maxZombies)
+        #expect(driver.state.chests.count <= GameSimulation.Configuration.standard.maxChests)
+        #expect(driver.state.projectiles.count <= 120)
+        #expect(driver.state.players.allSatisfy {
+            $0.position.x.isFinite &&
+            $0.position.y.isFinite &&
+            $0.rotation.isFinite &&
+            $0.health.isFinite
+        })
+        #expect(driver.state.zombies.allSatisfy {
+            $0.position.x.isFinite &&
+            $0.position.y.isFinite &&
+            $0.rotation.isFinite &&
+            $0.health.isFinite
+        })
+    }
+
     @Test("Simulation rotates zombies toward their selected player while moving")
     func simulationRotatesZombiesTowardTheirSelectedPlayerWhileMoving() {
         // Given a zombie to the right of a player and a movement-free player input.

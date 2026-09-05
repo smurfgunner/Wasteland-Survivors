@@ -147,11 +147,11 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         let inputsByPlayer = Dictionary(
             queuedInputs.map { ($0.playerID, $0) },
             uniquingKeysWith: { current, replacement in
-                isNewer(current.sequence, than: replacement.sequence) ? current : replacement
+                isNewer(replacement.sequence, than: current.sequence) ? replacement : current
             }
         )
         latestInputs.merge(inputsByPlayer) { current, replacement in
-            isNewer(current.sequence, than: replacement.sequence) ? current : replacement
+            isNewer(replacement.sequence, than: current.sequence) ? replacement : current
         }
         let inputsToApply = latestInputs.values.sorted { $0.playerID < $1.playerID }
         for input in inputsToApply {
@@ -387,7 +387,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
                   event.senderID == peerID,
                   event.sessionID == sessionID,
                   event.sequence > 0,
-                  event.simulationTick > 0 else { return false }
+                  event.simulationTick > 0,
+                  transport.connectedPeerIDs.contains(peerID) else { return false }
             return true
         case let .initialization(payload):
             guard payload.protocolVersion == protocolVersion,
@@ -395,7 +396,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
                   payload.hostID == peerID else { return false }
             return true
         case let .recovery(payload):
-            return payload.sessionID == sessionID
+            return role == .client && hostID == peerID && payload.sessionID == sessionID
         default:
             return true
         }
@@ -422,7 +423,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         case let .hostAnnouncement(announcement): handle(announcement)
         case let .joinRequest(request): handle(request)
         case let .joinAccepted(accepted): handle(accepted)
-        case let .playerInput(input): handle(input)
+        case let .playerInput(input): handle(input, from: peerID)
         case let .gameplayEvent(event):
             guard appliedEvents.insertIfNew(
                 event.event,
@@ -431,6 +432,7 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
             onGameplayEvent?(event)
             return true
         case let .initialization(payload):
+            guard eventReplicationSystem == nil else { return false }
             var system = EventReplicationSystem(localPlayerID: transport.localPeerID, sessionID: payload.sessionID)
             guard system.receive(payload, from: peerID) == .accepted else { return false }
             eventReplicationSystem = system
@@ -446,7 +448,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
                 let isReplaceableMovement = event.delivery == .replaceable && event.payload.isMovementEvent
                 guard isReplaceableMovement || event.sequence == senderSequence + 1 else {
                     onRecoveryRequested?(senderSequence + 1)
-                    if let recovery = recoveryProvider?(senderSequence + 1) {
+                    if role == .host,
+                       let recovery = recoveryProvider?(senderSequence + 1) {
                         send(.recovery(recovery), to: peerID ?? transport.localPeerID)
                     }
                     return false
@@ -545,8 +548,12 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
         becomeClient(hostID: accepted.hostID)
     }
 
-    private func handle(_ input: MultiplayerPlayerInput) {
+    private func handle(_ input: MultiplayerPlayerInput, from peerID: String? = nil) {
         guard (role == .host || role == .client),
+              (input.sequence > 0 ||
+               peerID == nil ||
+               peerID == transport.localPeerID ||
+               latestInputSequences[input.playerID] == UInt64.max),
               input.playerID != transport.localPeerID,
               transport.connectedPeerIDs.contains(input.playerID),
               isValid(input),
@@ -566,7 +573,8 @@ final class MultiplayerSessionCoordinator: MultiplayerTransportDelegate, Multipl
 
     private func isNewer(_ incoming: UInt64, than latest: UInt64) -> Bool {
         let distance = incoming &- latest
-        return distance > 0 && distance < UInt64.max / 2
+        let halfRange = UInt64(1) << 63
+        return distance > 0 && distance < halfRange
     }
 
     private func hasPriority(over peer: MultiplayerHello) -> Bool {

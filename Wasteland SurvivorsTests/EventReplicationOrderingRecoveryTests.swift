@@ -103,6 +103,109 @@ struct EventReplicationOrderingRecoveryTests {
         #expect(system.apply(recovery) == .duplicate)
     }
 
+    @Test("Applying the same non-empty recovery twice is idempotent")
+    func nonEmptyRecoveryIsIdempotent() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        let recovery = makeRecovery()
+
+        #expect(system.apply(recovery) == .accepted)
+        #expect(system.apply(recovery) == .duplicate)
+    }
+
+    @Test("Recovery must begin at the first missing event")
+    func recoveryCannotSkipMissingSequenceRange() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.firstSequence = 4
+        recovery.lastSequence = 4
+
+        #expect(system.apply(recovery) == .rejected(.invalidSequence))
+    }
+
+    @Test("Recovery cannot move simulation time backwards")
+    func recoveryCannotRegressSimulationTick() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.simulationTick = 599
+
+        #expect(system.apply(recovery) == .rejected(.inconsistentTick))
+    }
+
+    @Test("Recovery rejects invalid player health")
+    func recoveryRejectsInvalidPlayerHealth() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.playerHealth = ["client": -.infinity]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
+    @Test("Recovery rejects non-finite player transforms")
+    func recoveryRejectsNonFinitePlayerTransform() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.players = [.init(
+            id: "client",
+            spawnPosition: .init(x: .nan, y: 0),
+            facing: .infinity
+        )]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
+    @Test("Recovery targets must reference active entities")
+    func recoveryRejectsTargetsForUnknownEntities() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.playerTargets = ["unknown-player": "unknown-zombie"]
+        recovery.zombieTargets = ["unknown-zombie": "unknown-player"]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
+    @Test("Recovery metadata cannot reference unknown players")
+    func recoveryRejectsMetadataForUnknownPlayers() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.playerHealth = ["unknown-player": 100]
+        recovery.equipment = ["unknown-player": .rifle]
+        recovery.playerDeaths = ["unknown-player"]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
+    @Test("Recovery cannot mark the same entity active and removed")
+    func recoveryRejectsContradictoryEntitySets() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.removedEntities = ["chest-1", "power-up-1", "zombie-1"]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
+    @Test("Recovery restores zombie targets")
+    func recoveryRestoresZombieTargets() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.zombieTargets = ["zombie-1": "client"]
+        #expect(system.apply(recovery) == .accepted)
+
+        #expect(system.setZombieTarget(zombieID: "zombie-1", playerID: "client") == .accepted)
+        #expect(system.drainOutgoingEvents().isEmpty)
+    }
+
+    @Test("Recovery rejects empty entity identities")
+    func recoveryRejectsEmptyEntityIdentities() {
+        var system = EventReplicationTestFixtures.initializedSystem()
+        var recovery = makeRecovery()
+        recovery.players = [.init(id: "", spawnPosition: .zero)]
+        recovery.zombies = [.init(id: "", position: .zero, health: 100)]
+        recovery.activeChests = [""]
+        recovery.activePowerUps = [""]
+
+        #expect(system.apply(recovery) == .rejected(.malformedPayload))
+    }
+
     @Test("Recovery does not use a periodic board snapshot message")
     func recoveryDoesNotUseAPeriodicBoardSnapshotMessage() throws {
         let recovery = MultiplayerRecoveryPayload.empty
@@ -142,5 +245,32 @@ struct EventReplicationOrderingRecoveryTests {
             if case .recovery = message { return false }
             return true
         })
+    }
+}
+
+private extension EventReplicationOrderingRecoveryTests {
+    func makeRecovery() -> MultiplayerRecoveryPayload {
+        MultiplayerRecoveryPayload(
+            sessionID: EventReplicationTestFixtures.sessionID,
+            firstSequence: 2,
+            lastSequence: 4,
+            simulationTick: 604,
+            players: [
+                .init(id: "host", spawnPosition: .zero),
+                .init(id: "client", spawnPosition: .init(x: 90, y: 0))
+            ],
+            zombies: [
+                .init(id: "zombie-1", position: .init(x: 100, y: 100), health: 100)
+            ],
+            activeChests: ["chest-1"],
+            activePowerUps: ["power-up-1"],
+            score: 0,
+            playerHealth: ["host": 100, "client": 100],
+            playerTargets: [:],
+            zombieTargets: [:],
+            equipment: ["host": .pistol, "client": .pistol],
+            removedEntities: [],
+            playerDeaths: []
+        )
     }
 }
