@@ -1,12 +1,17 @@
 import SpriteKit
 
 final class ProjectileNode: SKNode {
-    let weapon: WeaponType
-    private let projectileSpeed: CGFloat = 600
-    private let lifetime: TimeInterval = 0.7
+    let multiplayerID: String
+    static let lifetime: TimeInterval = 0.7
 
-    init(weapon: WeaponType, directionAngle: CGFloat) {
+    let weapon: WeaponType
+    let damage: CGFloat
+    private let projectileSpeed: CGFloat = 600
+
+    init(weapon: WeaponType, damage: CGFloat? = nil, directionAngle: CGFloat, multiplayerID: String = UUID().uuidString) {
+        self.multiplayerID = multiplayerID
         self.weapon = weapon
+        self.damage = damage ?? weapon.damage
         super.init()
 
         zRotation = directionAngle
@@ -26,9 +31,9 @@ final class ProjectileNode: SKNode {
         physicsBody = body
 
         run(.sequence([
-            .wait(forDuration: lifetime),
+            .wait(forDuration: Self.lifetime),
             .removeFromParent()
-        ]))
+        ]), withKey: "projectileLifetime")
     }
 
     required init?(coder aDecoder: NSCoder) {

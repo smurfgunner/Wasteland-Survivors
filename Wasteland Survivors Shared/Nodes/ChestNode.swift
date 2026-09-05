@@ -6,15 +6,23 @@
 import SpriteKit
 
 final class ChestNode: SKNode {
+    let multiplayerID: String
+    static let pulseCycleDuration: TimeInterval = 1.6
+
     private(set) var isOpened: Bool = false
     
     private let box = SKShapeNode(rectOf: CGSize(width: 28, height: 22), cornerRadius: 4)
     private let latch = SKShapeNode(circleOfRadius: 4)
     
-    override init() {
+    init(multiplayerID: String = UUID().uuidString) {
+        self.multiplayerID = multiplayerID
         super.init()
         setupVisuals()
         setupPhysics()
+    }
+
+    override convenience init() {
+        self.init(multiplayerID: UUID().uuidString)
     }
     
     required init?(coder aDecoder: NSCoder) {
@@ -33,9 +41,9 @@ final class ChestNode: SKNode {
         addChild(latch)
         
         box.run(.repeatForever(.sequence([
-            .scale(to: 1.08, duration: 0.8),
-            .scale(to: 1.0, duration: 0.8)
-        ])))
+            .scale(to: 1.08, duration: Self.pulseCycleDuration / 2),
+            .scale(to: 1.0, duration: Self.pulseCycleDuration / 2)
+        ])), withKey: "chestPulse")
     }
     
     private func setupPhysics() {

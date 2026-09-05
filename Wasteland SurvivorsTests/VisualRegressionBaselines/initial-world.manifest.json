@@ -1,0 +1,15 @@
+{
+  "scenario": "initial-world",
+  "seed": 42,
+  "sceneSize": {
+    "width": 800,
+    "height": 600
+  },
+  "nodeCount": 389,
+  "structuralFingerprint": "8573638188357846974",
+  "capture": {
+    "frame": "scene-initial-world.png",
+    "entityMask": "scene-initial-world.entities.png",
+    "sceneGraph": "scene-initial-world.json"
+  }
+}

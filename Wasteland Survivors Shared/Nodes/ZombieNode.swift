@@ -6,16 +6,24 @@
 import SpriteKit
 
 final class ZombieNode: SKNode {
+    let multiplayerID: String
+    static let hitFlashDuration: TimeInterval = 0.06
+    static let deathAnimationDuration: TimeInterval = 0.25
+
     private(set) var health: CGFloat = 60
     private(set) var isDead: Bool = false
-    private let moveSpeed: CGFloat = CGFloat.random(in: 60...95)
+    private let moveSpeed: CGFloat
+    private let randomSource: RandomSource
     private var lastAttackTime: TimeInterval = 0
     private let attackCooldown: TimeInterval = 0.6
     
     private let bodySprite = SKShapeNode(circleOfRadius: 15)
     private let healthBar = SKShapeNode(rectOf: CGSize(width: 24, height: 4), cornerRadius: 1)
     
-    override init() {
+    init(randomSource: RandomSource = SystemRandomSource(), multiplayerID: String = UUID().uuidString) {
+        self.multiplayerID = multiplayerID
+        self.randomSource = randomSource
+        moveSpeed = randomSource.nextCGFloat(in: 60...95)
         super.init()
         setupVisuals()
         setupPhysics()
@@ -85,22 +93,46 @@ final class ZombieNode: SKNode {
     
     func takeDamage(amount: CGFloat) {
         guard !isDead else { return }
-        health -= amount
+        health = Swift.max(0, health - amount)
         
         let ratio = max(0, health / 60)
         healthBar.xScale = ratio
         
         bodySprite.fillColor = .white
         bodySprite.run(.sequence([
-            .wait(forDuration: 0.06),
+            .wait(forDuration: Self.hitFlashDuration),
             .run { [weak self] in
                 self?.bodySprite.fillColor = SKColor(red: 0.28, green: 0.55, blue: 0.22, alpha: 1.0)
             }
-        ]))
+        ]), withKey: "damageFlash")
         
         if health <= 0 {
             die()
         }
+    }
+
+    func apply(multiplayerHealth: CGFloat) {
+        let authoritativeHealth = Swift.max(0, Swift.min(60, multiplayerHealth))
+        health = authoritativeHealth
+        healthBar.xScale = health / 60
+        if health <= 0 {
+            if !isDead {
+                die()
+            }
+            return
+        }
+
+        if isDead {
+            revive()
+        }
+    }
+
+    private func revive() {
+        isDead = false
+        removeAllActions()
+        alpha = 1
+        setScale(1)
+        setupPhysics()
     }
     
     private func die() {
@@ -110,10 +142,10 @@ final class ZombieNode: SKNode {
         
         run(.sequence([
             .group([
-                .scale(to: 0.2, duration: 0.25),
-                .fadeOut(withDuration: 0.25)
+                .scale(to: 0.2, duration: Self.deathAnimationDuration),
+                .fadeOut(withDuration: Self.deathAnimationDuration)
             ]),
             .removeFromParent()
-        ]))
+        ]), withKey: "deathAnimation")
     }
 }

@@ -16,6 +16,7 @@ final class GameViewController: NSViewController {
         
         if let view = self.view as? SKView {
             let scene = GameScene.newGameScene(size: view.bounds.size)
+            scene.onExitRequested = { NSApplication.shared.terminate(nil) }
             view.preferredFramesPerSecond = 120
             view.presentScene(scene)
             view.ignoresSiblingOrder = true
